@@ -1,0 +1,7 @@
+﻿/.vs
+/obj
+/bin
+
+/data
+/gpt2_124M.bin
+/gpt2_124M_debug_state.bin
