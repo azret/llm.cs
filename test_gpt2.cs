@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
+
+using static kernel32;
+using static GPT2;
+using static MathF;
 
 unsafe class test_gpt2 {
     static bool check_tensor(float* a, float* b, int n, string label) {
@@ -43,24 +46,19 @@ unsafe class test_gpt2 {
     }
 
     public struct timespec {
-        public long tv_sec;  // Seconds - >= 0
-        public long tv_nsec; // Nanoseconds - [0, 999999999]
+        public double secs;
     };
 
     public const int CLOCK_MONOTONIC = 0;
     public static unsafe void clock_gettime(int clk_id, timespec* tp) {
-        var ticks = Stopwatch.GetTimestamp();
-        tp->tv_sec = ticks / 1000;
-        tp->tv_nsec = (ticks % 1000) * 1000000;
+        tp->secs = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
     }
 
 #if test_gpt2
     static unsafe void Main(string[] args) {
         // build the GPT-2 model from a checkpoint
         GPT2 model;
-        GPT2.gpt2_build_from_checkpoint(
-            &model,
-            "gpt2_124M.bin");
+        gpt2_build_from_checkpoint(&model, "gpt2_124M.bin");
 
         int C = model.config.channels;
         int V = model.config.vocab_size;
@@ -68,33 +66,33 @@ unsafe class test_gpt2 {
         int L = model.config.num_layers;
 
         // load additional information that we will use for debugging and error checking
-        IntPtr state_file = Win32.fopen("gpt2_124M_debug_state.bin", "rb");
+        IntPtr state_file = fopen("gpt2_124M_debug_state.bin", "rb");
         int[] state_header = new int[256];
-        Win32.fread(state_header, state_file);
+        fread(state_header, state_file);
         if (state_header[0] != 20240327) { throw new Exception("Bad magic state file"); }
         if (state_header[1] != 1) { throw new Exception("Bad version in state file"); }
         int B = state_header[2]; // batch size, e.g. 4
         int T = state_header[3]; // time / sequence length (e.g. 64, up to maxT)
-        Console.Write("[State]\n");
-        Console.Write("batch_size: {0}\n", B);
-        Console.Write("seq_len: {0}\n", T);
+        printf("[State]\n");
+        printf("batch_size: %d\n", B);
+        printf("seq_len: %d\n", T);
 
-        GPT2.ParameterTensors expected_grads;
-        float* expected_grads_memory = GPT2.malloc_and_point_parameters(&expected_grads, model.param_sizes);
+        ParameterTensors expected_grads;
+        float* expected_grads_memory = malloc_and_point_parameters(&expected_grads, model.param_sizes);
 
         // inputs and expected outputs, only used for error checking
-        int* x = (int*)Marshal.AllocHGlobal(B * T * sizeof(int));
-        int* y = (int*)Marshal.AllocHGlobal(B * T * sizeof(int));
-        float* expected_logits = (float*)Marshal.AllocHGlobal(B * T * V * sizeof(float));
-        float* expected_loss = (float*)Marshal.AllocHGlobal(1 * sizeof(float));
+        int* x = (int*) malloc(B * T * sizeof(int));
+        int* y = (int*) malloc(B * T * sizeof(int));
+        float* expected_logits = (float*) malloc(B * T * V * sizeof(float));
+        float* expected_loss = (float*) malloc(1 * sizeof(float));
 
         // read reference information from Python
-        Win32.fread(x, sizeof(int), B * T, state_file);
-        Win32.fread(y, sizeof(int), B * T, state_file);
-        Win32.fread(expected_logits, sizeof(float), B * T * V, state_file);
-        Win32.fread(expected_loss, sizeof(float), 1, state_file);
-        Win32.fread(expected_grads_memory, sizeof(float), model.num_parameters, state_file);
-        Win32.fclose(state_file);
+        fread(x, sizeof(int), B*T, state_file);
+        fread(y, sizeof(int), B*T, state_file);
+        fread(expected_logits, sizeof(float), B*T*V, state_file);
+        fread(expected_loss, sizeof(float), 1, state_file);
+        fread(expected_grads_memory, sizeof(float), model.num_parameters, state_file);
+        fclose(state_file);
 
         // overall OK signal for the test
         bool allok = true;
@@ -106,32 +104,31 @@ unsafe class test_gpt2 {
             timespec start, end;
             clock_gettime(CLOCK_MONOTONIC, &start);
 
-            GPT2.gpt2_forward(&model, x, y, B, T);
-            GPT2.gpt2_zero_grad(&model);
-            GPT2.gpt2_backward(&model);
+            gpt2_forward(&model, x, y, B, T);
+            gpt2_zero_grad(&model);
+            gpt2_backward(&model);
 
             clock_gettime(CLOCK_MONOTONIC, &end);
-            double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
 
             if (step == 0) {
                 // error checking at step 0 for reference activations/gradients
 
                 // at this point, target should be equal to expected_logits, let's compare
-                bool logits_ok = true;
+                int logits_ok = 1;
                 for (int i=0; i<B*T*V; i++) {
                     if(i < 3) {
-                        Console.Write("{0} {1}\n", expected_logits[i], model.acts.logits[i]);
+                        printf("%f %f\n", expected_logits[i], model.acts.logits[i]);
                     }
                     if (Math.Abs(expected_logits[i] - model.acts.logits[i]) >= 1e-2) {
-                        Console.Write("MISMATCH AT INDEX {0}: ", i);
-                        Console.Write("{0} {1}\n", expected_logits[i],model.acts.logits[i]);
-                        logits_ok = false;
+                        printf("MISMATCH AT INDEX %d: ", i);
+                        printf("%f %f\n", expected_logits[i],model.acts.logits[i]);
+                        logits_ok = 0;
                         break;
                     }
                 }
-                if(!logits_ok) { Console.Write("NOT "); }
-                Console.Write("OK (LOGITS)\n");
-                allok = allok && logits_ok;
+                if(logits_ok == 0) { printf("NOT "); }
+                printf("OK (LOGITS)\n");
+                allok = allok && logits_ok == 1;
 
                 // compare the achieved loss
                 if (Math.Abs(model.mean_loss - *expected_loss) >= 1e-2) {
@@ -143,7 +140,7 @@ unsafe class test_gpt2 {
 
                 // finally check all the gradients
                 bool[] gradoks =  new bool[16];
-                GPT2.ParameterTensors grads = model.grads;
+                ParameterTensors grads = model.grads;
                 gradoks[0] = check_tensor(grads.wte, expected_grads.wte, V*C, "dwte");
                 gradoks[1] = check_tensor(grads.wpe, expected_grads.wpe, maxT*C, "dwpe");
                 gradoks[2] = check_tensor(grads.ln1w, expected_grads.ln1w, L*C, "dln1w");
@@ -165,10 +162,11 @@ unsafe class test_gpt2 {
                 }
             }
 
-            GPT2.gpt2_update(&model, 1e-4f, 0.9f, 0.999f, 1e-8f, 0.01f, step+1);
+            gpt2_update(&model, 1e-4f, 0.9f, 0.999f, 1e-8f, 0.01f, step+1);
 
             // print the timing information at the end
-            Console.Write("step {0}: loss {1} (took {2} ms)\n", step, model.mean_loss, time_elapsed_s * 1000);
+            double time_elapsed_ms = (end.secs - start.secs);
+            Console.Write("step {0}: loss {1} (took {2} ms)\n", step, model.mean_loss, time_elapsed_ms * 1000);
             losses[step] = model.mean_loss;
         }
 
@@ -195,16 +193,21 @@ unsafe class test_gpt2 {
                 Console.Write("loss ok at step {0}: {1} {2}\n", i, losses[i], expected_losses[i]);
             }
         }
-
-        Console.Write("overall okay: {0}\n", allok);
+        if (allok) {
+            Console.BackgroundColor = ConsoleColor.Green;
+        } else {
+            Console.BackgroundColor = ConsoleColor.Red;
+        }
+        Console.Write("overall okay: {0}", allok);
+        Console.ResetColor();
 
         // free everything
-        Marshal.FreeHGlobal((IntPtr)x);
-        Marshal.FreeHGlobal((IntPtr)y);
-        Marshal.FreeHGlobal((IntPtr)expected_logits);
-        Marshal.FreeHGlobal((IntPtr)expected_loss);
-        Marshal.FreeHGlobal((IntPtr)expected_grads_memory);
-        GPT2.gpt2_free(&model);
+        free(x);
+        free(y);
+        free(expected_logits);
+        free(expected_loss);
+        free(expected_grads_memory);
+        gpt2_free(&model);
 
         Console.ReadKey();
     }

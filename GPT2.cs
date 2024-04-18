@@ -1,9 +1,564 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
+using static kernel32;
+using static MathF;
+
 public unsafe struct GPT2 {
+    // ----------------------------------------------------------------------------
+    // all the individual layers' forward and backward passes
+    // B = batch_size, T = sequence_length, C = channels, V = vocab_size
+    public static unsafe void encoder_forward(float* out_,
+               int* inp, float* wte, float* wpe,
+               int B, int T, int C) {
+        // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
+        // inp is (B,T) of integers, holding the token ids at each (b,t) position
+        // wte is (V,C) of token embeddings, short for "weight token embeddings"
+        // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                // seek to the output position in out[b,t,:]
+                float* out_bt = out_ + b * T * C + t * C;
+                // get the index of the token at inp[b, t]
+                int ix = inp[b * T + t];
+                // seek to the position in wte corresponding to the token
+                float* wte_ix = wte + ix * C;
+                // seek to the position in wpe corresponding to the position
+                float* wpe_t = wpe + t * C;
+                // add the two vectors and store the result in out[b,t,:]
+                for (int i = 0; i < C; i++) {
+                    out_bt[i] = wte_ix[i] + wpe_t[i];
+                }
+            }
+        }
+    }
+
+    static unsafe void encoder_backward(float* dwte, float* dwpe,
+                  float* dout, int* inp,
+                  int B, int T, int C) {
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                float* dout_bt = dout + b * T * C + t * C;
+                int ix = inp[b * T + t];
+                float* dwte_ix = dwte + ix * C;
+                float* dwpe_t = dwpe + t * C;
+                for (int i = 0; i < C; i++) {
+                    float d = dout_bt[i];
+                    dwte_ix[i] += d;
+                    dwpe_t[i] += d;
+                }
+            }
+        }
+    }
+
+    public static unsafe void layernorm_forward(float* _Out, float* _Mean, float* _Rstd,
+        float* _In, float* _Weight, float* _Bias, int B, int T, int C) {
+
+        Parallel.For(0, B * T, (bt) => {
+            layernorm_forward_kernel(
+                bt,
+                _Out,
+                _Mean,
+                _Rstd,
+                _In,
+                _Weight,
+                _Bias,
+                T,
+                B,
+                C);
+        });
+    }
+
+    static unsafe void layernorm_forward_kernel(int bt, float* _Out, float* _Mean, float* _Rstd,
+        float* _In, float* _Weight, float* _Bias, int B, int T, int C) {
+
+        /* See https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html */
+
+        int b = bt / T;
+        int t = bt % T;
+
+        float eps = 1e-5f;
+
+        float* x = _In + b * T * C + t * C;
+
+        // calculate the mean
+        double mean = 0.0;
+        for (int i = 0; i < C; i++) {
+            mean += x[i];
+        }
+        mean = mean / C;
+
+        // calculate the variance (without any bias correction)
+        double variance = 0.0;
+        for (int i = 0; i < C; i++) {
+            double xshift = x[i] - mean;
+            variance += xshift * xshift;
+        }
+        variance = variance / C;
+
+        // calculate the rstd (reciprocal standard deviation)
+        double s = 1.0 / Math.Sqrt(variance + eps);
+
+        float* y = _Out + b * T * C + t * C;
+
+        for (int i = 0; i < C; i++) {
+            double n = (s * (x[i] - mean)); // normalize
+            double o = n * _Weight[i] + _Bias[i]; // scale and shift
+            y[i] = (float)o; // write
+        }
+
+        // cache the mean and rstd for the backward pass later
+        _Mean[b * T + t] = (float)mean;
+        _Rstd[b * T + t] = (float)s;
+    }
+
+    static void layernorm_backward_kernel1(int bt, float* dinp, float* dweight, float* dbias,
+                        float* dout, float* inp, float* weight, float* mean, float* rstd,
+                        int B, int T, int C) {
+
+        int b = bt / T;
+        int t = bt % T;
+
+        float* dout_bt = dout + b * T * C + t * C;
+        float* inp_bt = inp + b * T * C + t * C;
+        float* dinp_bt = dinp + b * T * C + t * C;
+        float mean_bt = mean[b * T + t];
+        float rstd_bt = rstd[b * T + t];
+
+        // first: two reduce operations
+        float dnorm_mean = 0.0f;
+        float dnorm_norm_mean = 0.0f;
+        for (int i = 0; i < C; i++) {
+            float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
+            float dnorm_i = weight[i] * dout_bt[i];
+            dnorm_mean += dnorm_i;
+            dnorm_norm_mean += dnorm_i * norm_bti;
+        }
+        dnorm_mean = dnorm_mean / C;
+        dnorm_norm_mean = dnorm_norm_mean / C;
+
+        // now iterate again and accumulate all the gradients
+        for (int i = 0; i < C; i++) {
+            float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
+            float dnorm_i = weight[i] * dout_bt[i];
+            // gradient contribution to bias
+            // atomicAdd(&dbias[i], dout_bt[i]);
+            dbias[i] += dout_bt[i];
+            // gradient contribution to weight
+            // atomicAdd(&dweight[i], norm_bti * dout_bt[i]);
+            dweight[i] += norm_bti * dout_bt[i];
+            // gradient contribution to input
+            float dval = 0.0f;
+            dval += dnorm_i; // term 1
+            dval -= dnorm_mean; // term 2
+            dval -= norm_bti * dnorm_norm_mean; // term 3
+            dval *= rstd_bt; // final scale
+            dinp_bt[i] += dval;
+        }
+    }
+
+    static unsafe void layernorm_backward(float* dinp, float* dweight, float* dbias,
+                        float* dout, float* inp, float* weight, float* mean, float* rstd,
+                        int B, int T, int C) {
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                layernorm_backward_kernel1(
+                    b * T + t,
+                    dinp, dweight, dbias,
+                    dout, inp, weight, mean, rstd,
+                    B, T, C);
+            }
+        }
+    }
+
+    private static void matmul_forward_kernel(int bt,
+                                              float* _Out,
+                                              float* _In,
+                                              float* _Weight,
+                                              float* _Bias,
+                                              int T,
+                                              int C,
+                                              int OC) {
+
+        int b = bt / T;
+        int t = bt % T;
+
+        float* x = _In + b * T * C + t * C;
+        float* y = _Out + b * T * OC + t * OC;
+        for (int o = 0; o < OC; o++) {
+            double val = (_Bias != null) ? _Bias[o] : 0.0f;
+            float* w = _Weight + o * C;
+            for (int i = 0; i < C; i++) {
+                val += x[i] * w[i];
+            }
+            y[o] = (float)val;
+        }
+    }
+
+    public static unsafe void matmul_forward(float* _Out,
+                                             float* _In,
+                                             float* _Weight,
+                                             float* _Bias,
+                                             int B,
+                                             int T,
+                                             int C,
+                                             int OC) {
+        Parallel.For(0, B * T, (bt) => {
+
+            int b = bt / T;
+            int t = bt % T;
+            Debug.Assert(b * T + t == bt);
+
+            matmul_forward_kernel(
+                bt,
+                _Out,
+                _In,
+                _Weight,
+                _Bias,
+                T,
+                C,
+                OC);
+        });
+    }
+
+    static unsafe void matmul_backward_cpu(float* dinp, float* dweight, float* dbias,
+                     float* dout, float* inp, float* weight,
+                     int B, int T, int C, int OC) {
+        // most of the running time is spent here and in matmul_forward
+        // this backward could be done in a single "round" of loops
+        // but that doesn't afford an efficient parallelization strategy
+
+        // backward into inp first, parallelize over B,T
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                float* dout_bt = dout + b * T * OC + t * OC;
+                float* dinp_bt = dinp + b * T * C + t * C;
+                for (int o = 0; o < OC; o++) {
+                    float* wrow = weight + o * C;
+                    float d = dout_bt[o];
+                    for (int i = 0; i < C; i++) {
+                        dinp_bt[i] += wrow[i] * d;
+                    }
+                }
+            }
+        }
+
+        // backward into weight/bias, parallelize over output channels OC
+        for (int o = 0; o < OC; o++) {
+            for (int b = 0; b < B; b++) {
+                for (int t = 0; t < T; t++) {
+                    float* dout_bt = dout + b * T * OC + t * OC;
+                    float* inp_bt = inp + b * T * C + t * C;
+                    float* dwrow = dweight + o * C;
+                    float d = dout_bt[o];
+                    if (dbias != null) { dbias[o] += d; }
+                    for (int i = 0; i < C; i++) {
+                        dwrow[i] += inp_bt[i] * d;
+                    }
+                }
+            }
+        }
+    }
+
+    static unsafe void matmul_backward(float* dinp, float* dweight, float* dbias,
+                     float* dout, float* inp, float* weight,
+                     int B, int T, int C, int OC) {
+        Parallel.For(0, B * T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
+            float* dout_bt = dout + b * T * OC + t * OC;
+            float* dinp_bt = dinp + b * T * C + t * C;
+            for (int o = 0; o < OC; o++) {
+                float* wrow = weight + o * C;
+                float d = dout_bt[o];
+                for (int i = 0; i < C; i++) {
+                    dinp_bt[i] += wrow[i] * d;
+                }
+            }
+        });
+
+        Parallel.For(0, OC, (o) => {
+            for (int b = 0; b < B; b++) {
+                for (int t = 0; t < T; t++) {
+                    float* dout_bt = dout + b * T * OC + t * OC;
+                    float* inp_bt = inp + b * T * C + t * C;
+                    float* dwrow = dweight + o * C;
+                    float d = dout_bt[o];
+                    if (dbias != null) { dbias[o] += d; }
+                    for (int i = 0; i < C; i++) {
+                        dwrow[i] += inp_bt[i] * d;
+                    }
+                }
+            }
+        });
+    }
+
+    public static unsafe void attention_forward_cpu(float* out_, float* preatt, float* att,
+                           float* inp,
+                           int B, int T, int C, int NH) {
+        // input is (B, T, 3C) holding the query, key, value (Q, K, V) vectors
+        // preatt, att are (B, NH, T, T). NH = number of heads, T = sequence length
+        // that holds the pre-attention and post-attention scores (used in backward)
+        // output is (B, T, C)
+        // attention is the only layer that mixes information across time
+        // every other operation is applied at every (b,t) position independently
+        // (and of course, no layer mixes information across batch)
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+        float scale = 1.0f / sqrtf(hs);
+
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                for (int h = 0; h < NH; h++) {
+                    float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+                    float* preatt_bth = preatt + b*NH*T*T + h*T*T + t*T;
+                    float* att_bth = att + b*NH*T*T + h*T*T + t*T;
+
+                    // pass 1: calculate query dot key and maxval
+                    float maxval = -10000.0f; // TODO something better
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+
+                        // (query_t) dot (key_t2)
+                        float val = 0.0f;
+                        for (int i = 0; i < hs; i++) {
+                            val += query_t[i] * key_t2[i];
+                        }
+                        val *= scale;
+                        if (val > maxval) {
+                            maxval = val;
+                        }
+
+                        preatt_bth[t2] = val;
+                    }
+
+                    // pass 2: calculate the exp and keep track of sum
+                    // maxval is being calculated and subtracted only for numerical stability
+                    float expsum = 0.0f;
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        float expv = expf(preatt_bth[t2] - maxval);
+                        expsum += expv;
+                        att_bth[t2] = expv;
+                    }
+                    float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
+
+                    // pass 3: normalize to get the softmax
+                    for (int t2 = 0; t2 < T; t2++) {
+                        if (t2 <= t) {
+                            att_bth[t2] *= expsum_inv;
+                        } else {
+                            // causal attention mask. not strictly necessary to set to zero here
+                            // only doing this explicitly for debugging and checking to PyTorch
+                            att_bth[t2] = 0.0f;
+                        }
+                    }
+
+                    // pass 4: accumulate weighted values into the output of attention
+                    float* out_bth = out_ + b * T * C + t * C + h * hs;
+                    for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C*2; // +C*2 because it's value
+                        float att_btht2 = att_bth[t2];
+                        for (int i = 0; i < hs; i++) {
+                            out_bth[i] += att_btht2 * value_t2[i];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    public static unsafe void attention_forward(float* out_, float* preatt, float* att,
+                           float* inp,
+                           int B, int T, int C, int NH) {
+
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+        float scale = (float)(1.0 / Math.Sqrt(hs));
+
+        Parallel.For(0, B*T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
+            for (int h = 0; h < NH; h++) {
+                float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+                float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
+                float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+
+                // pass 1: calculate query dot key and maxval
+                float maxval = -10000.0f; // TODO something better
+                for (int t2 = 0; t2 <= t; t2++) {
+                    float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+
+                    // (query_t) dot (key_t2)
+                    float val = 0.0f;
+                    for (int i = 0; i < hs; i++) {
+                        val += query_t[i] * key_t2[i];
+                    }
+                    val *= scale;
+                    if (val > maxval) {
+                        maxval = val;
+                    }
+
+                    preatt_bth[t2] = val;
+                }
+
+                // pass 2: calculate the exp and keep track of sum
+                // maxval is being calculated and subtracted only for numerical stability
+                float expsum = 0.0f;
+                for (int t2 = 0; t2 <= t; t2++) {
+                    float expv = (float)Math.Exp(preatt_bth[t2] - maxval);
+                    expsum += expv;
+                    att_bth[t2] = expv;
+                }
+                float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
+
+                // pass 3: normalize to get the softmax
+                for (int t2 = 0; t2 < T; t2++) {
+                    if (t2 <= t) {
+                        att_bth[t2] *= expsum_inv;
+                    } else {
+                        // causal attention mask. not strictly necessary to set to zero here
+                        // only doing this explicitly for debugging and checking to PyTorch
+                        att_bth[t2] = 0.0f;
+                    }
+                }
+
+                // pass 4: accumulate weighted values into the output of attention
+                float* out_bth = out_ + b * T * C + t * C + h * hs;
+                for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
+                for (int t2 = 0; t2 <= t; t2++) {
+                    float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
+                    float att_btht2 = att_bth[t2];
+                    for (int i = 0; i < hs; i++) {
+                        out_bth[i] += att_btht2 * value_t2[i];
+                    }
+                }
+            }
+        });
+    }
+
+    static unsafe void attention_backward_cpu(float* dinp, float* dpreatt, float* datt,
+                            float* dout, float* inp, float* att,
+                            int B, int T, int C, int NH) {
+        // inp/dinp are (B, T, 3C) Q,K,V
+        // att/datt/dpreatt are (B, NH, T, T)
+        // dout is (B, T, C)
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+        float scale = 1.0f / sqrtf(hs);
+
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                for (int h = 0; h < NH; h++) {
+                    float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+                    float* datt_bth = datt + b * NH * T * T + h * T * T + t * T;
+                    float* dpreatt_bth = dpreatt + b * NH * T * T + h * T * T + t * T;
+                    float* dquery_t = dinp + b * T * C3 + t * C3 + h * hs;
+                    float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+
+                    // backward pass 4, through the value accumulation
+                    float* dout_bth = dout + b * T * C + t * C + h * hs;
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
+                        float* dvalue_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C * 2;
+                        for (int i = 0; i < hs; i++) {
+                            // in the forward pass this was:
+                            // out_bth[i] += att_bth[t2] * value_t2[i];
+                            // so now we have:
+                            datt_bth[t2] += value_t2[i] * dout_bth[i];
+                            dvalue_t2[i] += att_bth[t2] * dout_bth[i];
+                        }
+                    }
+
+                    // backward pass 2 & 3, the softmax
+                    // note that softmax (like e.g. tanh) doesn't need the input (preatt) to backward
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        for (int t3 = 0; t3 <= t; t3++) {
+                            float indicator = t2 == t3 ? 1.0f : 0.0f;
+                            float local_derivative = att_bth[t2] * (indicator - att_bth[t3]);
+                            dpreatt_bth[t3] += local_derivative * datt_bth[t2];
+                        }
+                    }
+
+                    // backward pass 1, the query @ key matmul
+                    for (int t2 = 0; t2 <= t; t2++) {
+                        float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+                        float* dkey_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+                        for (int i = 0; i < hs; i++) {
+                            // in the forward pass this was:
+                            // preatt_bth[t2] += (query_t[i] * key_t2[i]) * scale;
+                            // so now we have:
+                            dquery_t[i] += key_t2[i] * dpreatt_bth[t2] * scale;
+                            dkey_t2[i] += query_t[i] * dpreatt_bth[t2] * scale;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static unsafe void attention_backward(float* dinp, float* dpreatt, float* datt,
+                            float* dout, float* inp, float* att,
+                            int B, int T, int C, int NH) {
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+        float scale = (float)(1.0 / Math.Sqrt(hs));
+
+        Parallel.For(0, B * T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
+
+            for (int h = 0; h < NH; h++) {
+                float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+                float* datt_bth = datt + b * NH * T * T + h * T * T + t * T;
+                float* dpreatt_bth = dpreatt + b * NH * T * T + h * T * T + t * T;
+                float* dquery_t = dinp + b * T * C3 + t * C3 + h * hs;
+                float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+
+                // backward pass 4, through the value accumulation
+                float* dout_bth = dout + b * T * C + t * C + h * hs;
+                for (int t2 = 0; t2 <= t; t2++) {
+                    float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
+                    float* dvalue_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C * 2;
+                    for (int i = 0; i < hs; i++) {
+                        // in the forward pass this was:
+                        // out_bth[i] += att_bth[t2] * value_t2[i];
+                        // so now we have:
+                        datt_bth[t2] += value_t2[i] * dout_bth[i];
+                        dvalue_t2[i] += att_bth[t2] * dout_bth[i];
+                    }
+                }
+
+                // backward pass 2 & 3, the softmax
+                // note that softmax (like e.g. tanh) doesn't need the input (preatt) to backward
+                for (int t2 = 0; t2 <= t; t2++) {
+                    for (int t3 = 0; t3 <= t; t3++) {
+                        float indicator = t2 == t3 ? 1.0f : 0.0f;
+                        float local_derivative = att_bth[t2] * (indicator - att_bth[t3]);
+                        dpreatt_bth[t3] += local_derivative * datt_bth[t2];
+                    }
+                }
+
+                // backward pass 1, the query @ key matmul
+                for (int t2 = 0; t2 <= t; t2++) {
+                    float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+                    float* dkey_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+                    for (int i = 0; i < hs; i++) {
+                        // in the forward pass this was:
+                        // preatt_bth[t2] += (query_t[i] * key_t2[i]) * scale;
+                        // so now we have:
+                        dquery_t[i] += key_t2[i] * dpreatt_bth[t2] * scale;
+                        dkey_t2[i] += query_t[i] * dpreatt_bth[t2] * scale;
+                    }
+                }
+            }
+        });
+    }
+
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public unsafe struct ParameterTensors {
         public const int NUM_PARAMETER_TENSORS = 16;
@@ -135,10 +690,10 @@ public unsafe struct GPT2 {
     public static unsafe void gpt2_build_from_checkpoint(GPT2* model, string checkpoint_path) {
         // read in model from a checkpoint file
         using (SafeFileHandle model_file = new SafeFileHandle(
-            Win32.fopen(checkpoint_path, "rb"), true)) {
+            fopen(checkpoint_path, "rb"), true)) {
 
             int[] model_header = new int[256];
-            Win32.fread(model_header, model_file.DangerousGetHandle());
+            fread(model_header, model_file.DangerousGetHandle());
             if (model_header[0] != 20240326) { throw new Exception("Bad magic model file"); }
             if (model_header[1] != 1) { throw new Exception("Bad version in model file"); }
 
@@ -185,7 +740,7 @@ public unsafe struct GPT2 {
 
             // read in all the parameters from file
             model->params_memory = malloc_and_point_parameters(&model->params_, model->param_sizes);
-            Win32.fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
+            fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
 
             // other inits
             model->acts_memory = null;
@@ -221,8 +776,8 @@ public unsafe struct GPT2 {
     }
 
     public static void gpt2_zero_grad(GPT2* model) {
-        if (model->grads_memory != null) { Win32.memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
-        if (model->grads_acts_memory != null) { Win32.memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
+        if (model->grads_memory != null) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
+        if (model->grads_acts_memory != null) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
     }
 
     public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -279,19 +834,20 @@ public unsafe struct GPT2 {
             model->inputs = (int*)Marshal.AllocHGlobal(B * T * sizeof(int));
             model->targets = (int*)Marshal.AllocHGlobal(B * T * sizeof(int)); // might be unused if we never have targets but it's small
         } else {
-            // validate B,T is no larger than what was previously allocated
-            // in principle, we could re-allocate a larger chunk of memory, for now we just error out
-            if (B > model->batch_size || T > model->seq_len) {
+            // validate B,T is consistent with how we've allocated the memory before
+            // in principle we could get more clever here in the future, for now this is safest
+            if (B != model->batch_size || T != model->seq_len) {
                 Console.Write("Error: batch size or sequence length is inadequately large\n");
                 Console.Write("Model: B={0} T={1}, Desired: B={2} T={3}\n", model->batch_size, model->seq_len, B, T);
                 throw new Exception("Batch size or sequence length is inadequately large.");
             }
+
         }
 
         // cache the inputs/targets
-        Win32.CopyMemory(model->inputs, inputs, B * T * sizeof(int));
+        CopyMemory(model->inputs, inputs, B * T * sizeof(int));
         if (targets != null) {
-            Win32.CopyMemory(model->targets, targets, B * T * sizeof(int));
+            CopyMemory(model->targets, targets, B * T * sizeof(int));
         }
 
         // forward pass
@@ -366,187 +922,6 @@ public unsafe struct GPT2 {
         }
     }
 
-    public static unsafe void matmul_forward(float* out_,
-                float* inp, float* weight, float* bias,
-                int B, int T, int C, int OC) {
-        matmul_forward_1(
-            out_, inp, weight, bias, B, T, C, OC);
-    }
-
-    public static unsafe void matmul_forward_cpu(float* out_,
-                    float* inp, float* weight, float* bias,
-                    int B, int T, int C, int OC) {
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                float* out_bt = out_ + b * T * OC + t * OC;
-                float* inp_bt = inp + b * T * C + t * C;
-                for (int o = 0; o < OC; o++) {
-                    float val = (bias != null) ? bias[o] : 0.0f;
-                    float* wrow = weight + o * C;
-                    for (int i = 0; i < C; i++) {
-                        val += inp_bt[i] * wrow[i];
-                    }
-                    out_bt[o] = val;
-                }
-            }
-        }
-    }
-
-    public static unsafe void matmul_forward_1(float* out_,
-                float* inp, float* weight, float* bias,
-                int B, int T, int C, int OC) {
-
-        int BT = B * T;
-
-        Parallel.For(0, BT, (bt) => {
-            int b = bt / BT;
-            int t = bt % BT;
-
-            float* out_bt = out_ + b * T * OC + t * OC;
-            float* inp_bt = inp + b * T * C + t * C;
-            for (int o = 0; o < OC; o++) {
-                float val = (bias != null) ? bias[o] : 0.0f;
-                float* wrow = weight + o * C;
-                for (int i = 0; i < C; i++) {
-                    val += inp_bt[i] * wrow[i];
-                }
-                out_bt[o] = val;
-            }
-        });
-    }
-
-    static unsafe void matmul_backward(float* dinp, float* dweight, float* dbias,
-                 float* dout, float* inp, float* weight,
-                 int B, int T, int C, int OC) {
-        matmul_backward_1(
-            dinp, dweight,
-            dbias, dout,
-            inp, weight,
-            B,
-            T,
-            C,
-            OC);
-    }
-
-    static unsafe void matmul_backward_1(float* dinp, float* dweight, float* dbias,
-                     float* dout, float* inp, float* weight,
-                     int B, int T, int C, int OC) {
-
-        int BT = B * T;
-
-        Parallel.For(0, BT, (bt) => {
-            int b = bt / BT;
-            int t = bt % BT;
-
-            float* dout_bt = dout + b * T * OC + t * OC;
-            float* dinp_bt = dinp + b * T * C + t * C;
-            for (int o = 0; o < OC; o++) {
-                float* wrow = weight + o * C;
-                float d = dout_bt[o];
-                for (int i = 0; i < C; i++) {
-                    dinp_bt[i] += wrow[i] * d;
-                }
-            }
-        });
-
-        // backward into weight/bias, parallelize over output channels OC
-        Parallel.For(0, OC, (o) => {
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    float* dout_bt = dout + b * T * OC + t * OC;
-                    float* inp_bt = inp + b * T * C + t * C;
-                    float* dwrow = dweight + o * C;
-                    float d = dout_bt[o];
-                    if (dbias != null) { dbias[o] += d; }
-                    for (int i = 0; i < C; i++) {
-                        dwrow[i] += inp_bt[i] * d;
-                    }
-                }
-            }
-        });
-    }
-
-    static unsafe void matmul_backward_cpu(float* dinp, float* dweight, float* dbias,
-                     float* dout, float* inp, float* weight,
-                     int B, int T, int C, int OC) {
-        // most of the running time is spent here and in matmul_forward
-        // this backward could be done in a single "round" of loops
-        // but that doesn't afford an efficient parallelization strategy
-
-        // backward into inp first, parallelize over B,T
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                float* dout_bt = dout + b * T * OC + t * OC;
-                float* dinp_bt = dinp + b * T * C + t * C;
-                for (int o = 0; o < OC; o++) {
-                    float* wrow = weight + o * C;
-                    float d = dout_bt[o];
-                    for (int i = 0; i < C; i++) {
-                        dinp_bt[i] += wrow[i] * d;
-                    }
-                }
-            }
-        }
-
-        // backward into weight/bias, parallelize over output channels OC
-        for (int o = 0; o < OC; o++) {
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    float* dout_bt = dout + b * T * OC + t * OC;
-                    float* inp_bt = inp + b * T * C + t * C;
-                    float* dwrow = dweight + o * C;
-                    float d = dout_bt[o];
-                    if (dbias != null) { dbias[o] += d; }
-                    for (int i = 0; i < C; i++) {
-                        dwrow[i] += inp_bt[i] * d;
-                    }
-                }
-            }
-        }
-    }
-
-    public static unsafe void layernorm_forward(float* out_, float* mean, float* rstd,
-                       float* inp, float* weight, float* bias,
-                       int B, int T, int C) {
-        // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
-        // both inp and out are (B,T,C) of the activations
-        // mean and rstd are (B,T) buffers, to be used later in backward pass
-        // at each position (b,t) of the input, the C-dimensional vector
-        // of activations gets normalized, then scaled and shifted
-        float eps = 1e-5f;
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                // seek to the input position inp[b,t,:]
-                float* x = inp + b * T * C + t * C;
-                // calculate the mean
-                float m = 0.0f;
-                for (int i = 0; i < C; i++) {
-                    m += x[i];
-                }
-                m = m / C;
-                // calculate the variance (without any bias correction)
-                float v = 0.0f;
-                for (int i = 0; i < C; i++) {
-                    float xshift = x[i] - m;
-                    v += xshift * xshift;
-                }
-                v = v / C;
-                // calculate the rstd (reciprocal standard deviation)
-                float s = (float)(1.0 / Math.Sqrt(v + eps));
-                // seek to the output position in out[b,t,:]
-                float* out_bt = out_ + b * T * C + t * C;
-                for (int i = 0; i < C; i++) {
-                    float n = (s * (x[i] - m)); // normalize
-                    float o = n * weight[i] + bias[i]; // scale and shift
-                    out_bt[i] = o; // write
-                }
-                // cache the mean and rstd for the backward pass later
-                mean[b * T + t] = m;
-                rstd[b * T + t] = s;
-            }
-        }
-    }
-
     static float GELU_SCALING_FACTOR = (float)Math.Sqrt(2.0 / Math.PI);
     public static unsafe void gelu_forward(float* out_, float* inp, int N) {
         // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
@@ -563,107 +938,33 @@ public unsafe struct GPT2 {
         }
     }
 
-    public static unsafe void attention_forward(float* out_, float* preatt, float* att,
-                       float* inp,
-                       int B, int T, int C, int NH) {
-        // input is (B, T, 3C) holding the query, key, value (Q, K, V) vectors
-        // preatt, att are (B, NH, T, T). NH = number of heads, T = sequence length
-        // that holds the pre-attention and post-attention scores (used in backward)
-        // output is (B, T, C)
-        // attention is the only layer that mixes information across time
-        // every other operation is applied at every (b,t) position independently
-        // (and of course, no layer mixes information across batch)
-        int C3 = C * 3;
-        int hs = C / NH; // head size
-        float scale = (float)(1.0 / Math.Sqrt(hs));
-
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                for (int h = 0; h < NH; h++) {
-                    float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-                    float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
-                    float* att_bth = att + b * NH * T * T + h * T * T + t * T;
-
-                    // pass 1: calculate query dot key and maxval
-                    float maxval = -10000.0f; // TODO something better
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-
-                        // (query_t) dot (key_t2)
-                        float val = 0.0f;
-                        for (int i = 0; i < hs; i++) {
-                            val += query_t[i] * key_t2[i];
-                        }
-                        val *= scale;
-                        if (val > maxval) {
-                            maxval = val;
-                        }
-
-                        preatt_bth[t2] = val;
-                    }
-
-                    // pass 2: calculate the exp and keep track of sum
-                    // maxval is being calculated and subtracted only for numerical stability
-                    float expsum = 0.0f;
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float expv = (float)Math.Exp(preatt_bth[t2] - maxval);
-                        expsum += expv;
-                        att_bth[t2] = expv;
-                    }
-                    float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
-
-                    // pass 3: normalize to get the softmax
-                    for (int t2 = 0; t2 < T; t2++) {
-                        if (t2 <= t) {
-                            att_bth[t2] *= expsum_inv;
-                        } else {
-                            // causal attention mask. not strictly necessary to set to zero here
-                            // only doing this explicitly for debugging and checking to PyTorch
-                            att_bth[t2] = 0.0f;
-                        }
-                    }
-
-                    // pass 4: accumulate weighted values into the output of attention
-                    float* out_bth = out_ + b * T * C + t * C + h * hs;
-                    for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
-                        float att_btht2 = att_bth[t2];
-                        for (int i = 0; i < hs; i++) {
-                            out_bth[i] += att_btht2 * value_t2[i];
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     public static unsafe void softmax_forward(float* probs, float* logits, int B, int T, int V) {
         // output: probs are (B,T,V) of the probabilities (sums to 1.0 in each b,t position)
         // input: logits is (B,T,V) of the unnormalized log probabilities
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                // probs <- softmax(logits)
-                float* logits_bt = logits + b * T * V + t * V;
-                float* probs_bt = probs + b * T * V + t * V;
+        Parallel.For(0, B * T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
 
-                // maxval is only calculated and subtracted for numerical stability
-                float maxval = -10000.0f; // TODO something better
-                for (int i = 0; i < V; i++) {
-                    if (logits_bt[i] > maxval) {
-                        maxval = logits_bt[i];
-                    }
-                }
-                float sum = 0.0f;
-                for (int i = 0; i < V; i++) {
-                    probs_bt[i] = (float)Math.Exp(logits_bt[i] - maxval);
-                    sum += probs_bt[i];
-                }
-                for (int i = 0; i < V; i++) {
-                    probs_bt[i] /= sum;
+            // probs <- softmax(logits)
+            float* logits_bt = logits + b * T * V + t * V;
+            float* probs_bt = probs + b * T * V + t * V;
+
+            // maxval is only calculated and subtracted for numerical stability
+            float maxval = -10000.0f; // TODO something better
+            for (int i = 0; i < V; i++) {
+                if (logits_bt[i] > maxval) {
+                    maxval = logits_bt[i];
                 }
             }
-        }
+            float sum = 0.0f;
+            for (int i = 0; i < V; i++) {
+                probs_bt[i] = (float)Math.Exp(logits_bt[i] - maxval);
+                sum += probs_bt[i];
+            }
+            for (int i = 0; i < V; i++) {
+                probs_bt[i] /= sum;
+            }
+        });
     }
 
     public static unsafe void crossentropy_forward(float* losses,
@@ -678,31 +979,6 @@ public unsafe struct GPT2 {
                 float* probs_bt = probs + b * T * V + t * V;
                 int ix = targets[b * T + t];
                 losses[b * T + t] = -(float)Math.Log(probs_bt[ix]);
-            }
-        }
-    }
-
-    public static unsafe void encoder_forward(float* out_,
-                   int* inp, float* wte, float* wpe,
-                   int B, int T, int C) {
-        // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
-        // inp is (B,T) of integers, holding the token ids at each (b,t) position
-        // wte is (V,C) of token embeddings, short for "weight token embeddings"
-        // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                // seek to the output position in out[b,t,:]
-                float* out_bt = out_ + b * T * C + t * C;
-                // get the index of the token at inp[b, t]
-                int ix = inp[b * T + t];
-                // seek to the position in wte corresponding to the token
-                float* wte_ix = wte + ix * C;
-                // seek to the position in wpe corresponding to the position
-                float* wpe_t = wpe + t * C;
-                // add the two vectors and store the result in out[b,t,:]
-                for (int i = 0; i < C; i++) {
-                    out_bt[i] = wte_ix[i] + wpe_t[i];
-                }
             }
         }
     }
@@ -850,127 +1126,6 @@ public unsafe struct GPT2 {
             float sech_out = 1.0f / (coshf_out * coshf_out);
             float local_grad = 0.5f * (1.0f + tanh_out) + x * 0.5f * sech_out * (float)GELU_SCALING_FACTOR * (1.0f + 3.0f * 0.044715f * x * x);
             dinp[i] += local_grad * dout[i];
-        }
-    }
-
-    static unsafe void layernorm_backward(float* dinp, float* dweight, float* dbias,
-                        float* dout, float* inp, float* weight, float* mean, float* rstd,
-                        int B, int T, int C) {
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                float* dout_bt = dout + b * T * C + t * C;
-                float* inp_bt = inp + b * T * C + t * C;
-                float* dinp_bt = dinp + b * T * C + t * C;
-                float mean_bt = mean[b * T + t];
-                float rstd_bt = rstd[b * T + t];
-
-                // first: two reduce operations
-                float dnorm_mean = 0.0f;
-                float dnorm_norm_mean = 0.0f;
-                for (int i = 0; i < C; i++) {
-                    float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
-                    float dnorm_i = weight[i] * dout_bt[i];
-                    dnorm_mean += dnorm_i;
-                    dnorm_norm_mean += dnorm_i * norm_bti;
-                }
-                dnorm_mean = dnorm_mean / C;
-                dnorm_norm_mean = dnorm_norm_mean / C;
-
-                // now iterate again and accumulate all the gradients
-                for (int i = 0; i < C; i++) {
-                    float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
-                    float dnorm_i = weight[i] * dout_bt[i];
-                    // gradient contribution to bias
-                    dbias[i] += dout_bt[i];
-                    // gradient contribution to weight
-                    dweight[i] += norm_bti * dout_bt[i];
-                    // gradient contribution to input
-                    float dval = 0.0f;
-                    dval += dnorm_i; // term 1
-                    dval -= dnorm_mean; // term 2
-                    dval -= norm_bti * dnorm_norm_mean; // term 3
-                    dval *= rstd_bt; // final scale
-                    dinp_bt[i] += dval;
-                }
-            }
-        }
-    }
-
-    static unsafe void attention_backward(float* dinp, float* dpreatt, float* datt,
-                        float* dout, float* inp, float* att,
-                        int B, int T, int C, int NH) {
-        // inp/dinp are (B, T, 3C) Q,K,V
-        // att/datt/dpreatt are (B, NH, T, T)
-        // dout is (B, T, C)
-        int C3 = C * 3;
-        int hs = C / NH; // head size
-        float scale = (float)(1.0 / Math.Sqrt(hs));
-
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                for (int h = 0; h < NH; h++) {
-                    float* att_bth = att + b * NH * T * T + h * T * T + t * T;
-                    float* datt_bth = datt + b * NH * T * T + h * T * T + t * T;
-                    float* dpreatt_bth = dpreatt + b * NH * T * T + h * T * T + t * T;
-                    float* dquery_t = dinp + b * T * C3 + t * C3 + h * hs;
-                    float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-
-                    // backward pass 4, through the value accumulation
-                    float* dout_bth = dout + b * T * C + t * C + h * hs;
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
-                        float* dvalue_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C * 2;
-                        for (int i = 0; i < hs; i++) {
-                            // in the forward pass this was:
-                            // out_bth[i] += att_bth[t2] * value_t2[i];
-                            // so now we have:
-                            datt_bth[t2] += value_t2[i] * dout_bth[i];
-                            dvalue_t2[i] += att_bth[t2] * dout_bth[i];
-                        }
-                    }
-
-                    // backward pass 2 & 3, the softmax
-                    // note that softmax (like e.g. tanh) doesn't need the input (preatt) to backward
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        for (int t3 = 0; t3 <= t; t3++) {
-                            float indicator = t2 == t3 ? 1.0f : 0.0f;
-                            float local_derivative = att_bth[t2] * (indicator - att_bth[t3]);
-                            dpreatt_bth[t3] += local_derivative * datt_bth[t2];
-                        }
-                    }
-
-                    // backward pass 1, the query @ key matmul
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-                        float* dkey_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-                        for (int i = 0; i < hs; i++) {
-                            // in the forward pass this was:
-                            // preatt_bth[t2] += (query_t[i] * key_t2[i]) * scale;
-                            // so now we have:
-                            dquery_t[i] += key_t2[i] * dpreatt_bth[t2] * scale;
-                            dkey_t2[i] += query_t[i] * dpreatt_bth[t2] * scale;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    static unsafe void encoder_backward(float* dwte, float* dwpe,
-                      float* dout, int* inp,
-                      int B, int T, int C) {
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                float* dout_bt = dout + b * T * C + t * C;
-                int ix = inp[b * T + t];
-                float* dwte_ix = dwte + ix * C;
-                float* dwpe_t = dwpe + t * C;
-                for (int i = 0; i < C; i++) {
-                    float d = dout_bt[i];
-                    dwte_ix[i] += d;
-                    dwpe_t[i] += d;
-                }
-            }
         }
     }
 
