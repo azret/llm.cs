@@ -4,9 +4,9 @@ This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CU
 
 ## notes
 
-The C#/CPU port is numerically identical to the C/CPU version. I'm currently porting the CUDA version which should be as fast as the original C/CUDA ✌️
+The C#/CPU port is numerically identical to the C/CPU version. Current best run is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized.
 
-Current best run is ~5s per iteration. We'll achieve even better results when all the layers are parallelized.
+✌️
 
 ```c
 [GPT-2]
