@@ -1,5 +1,0 @@
-tqdm
-numpy
-torch
-tiktoken
-transformers

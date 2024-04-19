@@ -4,7 +4,17 @@ This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CU
 
 ## notes
 
-The CPU port works. Both train_gtp2.cs and test_gpt2.cs produce numerically identical results as their C/CPU counter parts. Unfortunately both the C/CPU and the C#/CPU are not usable to train anything meaningful at this time.
+The C#/CPU port is numerically identical to the C/CPU version.
+
+## branches
+
+1. Initial Port
+
+https://github.com/azret/llm.cs/tree/reference
+
+2. Active work to port CUDA kernels using CUDA Driver API without any external dependencies.
+
+https://github.com/azret/llm.cs/tree/master
 
 ## quick start
 

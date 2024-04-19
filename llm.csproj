@@ -75,13 +75,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <None Include="build_msvc.bat" />
     <Compile Include="dev\cpu\MatMul.cs" />
     <None Include="dev\cuda\vectorAdd_kernel64.cu" />
     <None Include="dev\cuda\vectorAdd_kernel64.fatbin" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="train_gpt2.c" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="train_gpt2.py" />
