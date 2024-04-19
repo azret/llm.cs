@@ -8,7 +8,7 @@ The C#/CPU port is numerically identical to the C/CPU version.
 
 ## branches
 
-1. Initial Port
+1. Initial C/CPU -> C#/CPU Port.
 
 https://github.com/azret/llm.cs/tree/reference
 
