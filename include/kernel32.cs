@@ -13,23 +13,31 @@ public static class kernel32 {
             if (pos < 0 || pos + 1 >= fmt.Length) {
                 throw new ArgumentOutOfRangeException();
             }
+            string s = fmt.Substring(
+                0,
+                pos);
+            int skip = 2;
             switch (fmt[pos + 1]) {
                 case 'f':
+                    if (fmt[pos + 2] == '6') {
+                        s += "{" + i.ToString() + ":f6}";
+                        skip++;
+                    } else {
+                        s += "{" + i.ToString() + "}";
+                    }
+                    break;
                 case 'd':
                 case 's':
                 case 'g':
                 case 'e':
-                    string s = fmt.Substring(
-                        0,
-                        pos);
                     s += "{" + i.ToString()  + "}";
-                    s += fmt.Substring(
-                        pos + 2);
-                    fmt = s;
                     break;
                 default:
                     throw new NotImplementedException();
             }
+            s += fmt.Substring(
+                pos + skip);
+            fmt = s;
         }
         Console.Write(fmt, args);
     }

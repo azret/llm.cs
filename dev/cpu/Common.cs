@@ -26,7 +26,7 @@ internal static class Common {
             // ensure correctness for all elements
             if (Math.Abs(cpu_reference[i] - device_result[i]) > tolerance) {
                 Console.BackgroundColor = ConsoleColor.Red;
-                printf("Mismatch of %s at %d: %f vs %f", name, i, cpu_reference[i], device_result[i]);
+                printf("Mismatch of %s at %d: %f6 vs %f6", name, i, cpu_reference[i], device_result[i]);
                 Console.ResetColor();
                 printf("\n");
                 return;

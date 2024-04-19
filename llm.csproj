@@ -77,14 +77,10 @@
     <None Include="App.config" />
     <None Include="build_msvc.bat" />
     <Compile Include="dev\cpu\MatMul.cs" />
-    <None Include="dev\cuda\matmul_forward.cu" />
     <None Include="dev\cuda\vectorAdd_kernel64.cu" />
     <None Include="dev\cuda\vectorAdd_kernel64.fatbin" />
-    <None Include="train_gpt2.cu" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="test_gpt2.c" />
-    <None Include="test_gpt2.cu" />
     <None Include="train_gpt2.c" />
   </ItemGroup>
   <ItemGroup>
