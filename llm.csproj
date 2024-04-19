@@ -34,7 +34,7 @@
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;matmul_forward</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;LayerNorm</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -63,6 +63,8 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="dev\cpu\Common.cs" />
+    <Compile Include="dev\cpu\LayerNorm.cs" />
     <Compile Include="include\MathF.cs" />
     <Compile Include="include\nvcuda.cs" />
     <Compile Include="GPT2.cs" />
@@ -74,7 +76,7 @@
   <ItemGroup>
     <None Include="App.config" />
     <None Include="build_msvc.bat" />
-    <Compile Include="dev\cpu\matmul_forward.cs" />
+    <Compile Include="dev\cpu\MatMul.cs" />
     <None Include="dev\cuda\matmul_forward.cu" />
     <None Include="dev\cuda\vectorAdd_kernel64.cu" />
     <None Include="dev\cuda\vectorAdd_kernel64.fatbin" />

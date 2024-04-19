@@ -46,8 +46,12 @@ public static class kernel32 {
     [DllImport("kernel32.dll", EntryPoint = "RtlFillMemory", SetLastError = false)]
     public static extern unsafe void FillMemory(void* destination, int length, byte fill);
 
-    public static unsafe void memset(void* destination, byte fill, int length) {
-        FillMemory(destination, length, fill);
+    public static unsafe void memcpy(void* destination, void* source, int size) {
+        CopyMemory(destination, source, size);
+    }
+
+    public static unsafe void memset(void* destination, byte fill, int size) {
+        FillMemory(destination, size, fill);
     }
 
     public static unsafe void* malloc(int size) {

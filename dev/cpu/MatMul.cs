@@ -3,9 +3,9 @@ using System;
 using static kernel32;
 using static MathF;
 
-public static unsafe class matmul_forward {
+public static unsafe class MatMul {
 
-    /*  Reference Implementation */
+    /*  reference Implementation */
 
     static void matmul_forward_cpu_kernel(int b,
                                           int t,
@@ -18,6 +18,7 @@ public static unsafe class matmul_forward {
                                           int OC) {
         float* x = _In + b * T * C + t * C;
         float* y = _Out + b * T * OC + t * OC;
+
         for (int o = 0; o < OC; o++) {
             float val = (_Bias != null) ? _Bias[o] : 0.0f;
             float* w = _Weight + o * C;
@@ -28,7 +29,7 @@ public static unsafe class matmul_forward {
         }
     }
 
-    static void matmul_forward_cpu_0(float* _Out,
+    public static void matmul_forward_cpu_0(float* _Out,
                                        float* _In,
                                        float* _Weight,
                                        float* _Bias,
@@ -36,10 +37,8 @@ public static unsafe class matmul_forward {
                                        int T,
                                        int C,
                                        int OC) {
-        printf("matmul_forward_cpu_0:\n");
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
-                printf("    [%d, %d]\n", b, t);
                 matmul_forward_cpu_kernel(
                     b,
                     t,
@@ -54,7 +53,9 @@ public static unsafe class matmul_forward {
         }
     }
 
-    static void matmul_forward_cpu_1(float* _Out,
+    /* indexing sanity check */
+
+    public static void matmul_forward_cpu_1(float* _Out,
                                float* _In,
                                float* _Weight,
                                float* _Bias,
@@ -62,12 +63,10 @@ public static unsafe class matmul_forward {
                                int T,
                                int C,
                                int OC) {
-        int BT = B * T;
-        printf("matmul_forward_cpu_1:\n");
         for (int bt = 0; bt < B * T; bt++) {
-            int b = bt / BT; // This should be bt / T yet validate_result passes!?
-            int t = bt % BT;
-            printf("    [%d, %d]\n", b, t);
+            int b = bt / T;
+            int t = bt % T;
+
             matmul_forward_cpu_kernel(
                     b,
                     t,
@@ -81,8 +80,37 @@ public static unsafe class matmul_forward {
         }
     }
 
+    /* parallelize over B, T */
+
+    public static void matmul_forward_cpu_2(float* _Out,
+                           float* _In,
+                           float* _Weight,
+                           float* _Bias,
+                           int B,
+                           int T,
+                           int C,
+                           int OC) {
+
+        System.Threading.Tasks.Parallel.For(0, B * T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
+
+            matmul_forward_cpu_kernel(
+                    b,
+                    t,
+                    _Out,
+                    _In,
+                    _Weight,
+                    _Bias,
+                    T,
+                    C,
+                    OC);
+        });
+    }
+
     static unsafe void validate_result(float* device_result, float* cpu_reference,
-        string name, int num_elements, float tolerance=1e-4f) {
+        string name, int num_elements, float tolerance = 1e-4f) {
+        printf("%s:\n", name);
         for (int i = 0; i < num_elements; i++) {
             // print the first few comparisons
             if (i < 5) {
@@ -94,10 +122,10 @@ public static unsafe class matmul_forward {
                 return;
             }
         }
-        memset(device_result, 0, num_elements * sizeof(float));
-        printf("OK");
+        printf("OK\n");
     }
 
+#if matmul_forward3
     static int Main() {
         ulong seed = 37;
 
@@ -143,7 +171,6 @@ public static unsafe class matmul_forward {
         float* d_Weight = (float*)malloc(OC * C * sizeof(float));
         float* d_Bias = (float*)malloc(OC * sizeof(float));
 
-        for (int i = 0; i < B * T * OC; i++) { d_Out[i] = randf(&seed); }
         CopyMemory(d_In, h_In, B * T * C * sizeof(float));
         CopyMemory(d_Weight, h_Weight, C * OC * sizeof(float));
         CopyMemory(d_Bias, h_Bias, OC * sizeof(float));
@@ -171,9 +198,15 @@ public static unsafe class matmul_forward {
         // first check the correctness of the kernel
 
         matmul_forward_cpu_0(h_Out, h_In, h_Weight, h_Bias, B, T, C, OC);
-        matmul_forward_cpu_1(d_Out, h_In, h_Weight, h_Bias, B, T, C, OC);
+        validate_result(h_Out, h_Out, "matmul_forward_cpu_0", B * T * OC, 1e-7f);
 
-        validate_result(d_Out, h_Out, "d_Out", B * T * OC, 1e-1f);
+        for (int i = 0; i < B * T * OC; i++) { d_Out[i] = randf(&seed); }
+        matmul_forward_cpu_1(d_Out, d_In, d_Weight, d_Bias, B, T, C, OC);
+        validate_result(d_Out, h_Out, "matmul_forward_cpu_1", B * T * OC, 1e-7f);
+
+        for (int i = 0; i < B * T * OC; i++) { d_Out[i] = randf(&seed); }
+        matmul_forward_cpu_2(d_Out, d_In, d_Weight, d_Bias, B, T, C, OC);
+        validate_result(d_Out, h_Out, "matmul_forward_cpu_2", B * T * OC, 1e-7f);
 
         // // time the kernel at different block sizes
         // int sqrt_block_sizes[] = { 4, 8, 16, 32 };
@@ -218,6 +251,9 @@ public static unsafe class matmul_forward {
         Console.ReadKey();
         return 0;
     }
+    
+#endif
+}
 
     /*
     // ----------------------------------------------------------------------------
@@ -413,6 +449,4 @@ public static unsafe class matmul_forward {
         }
     }
     */
-
-}
 

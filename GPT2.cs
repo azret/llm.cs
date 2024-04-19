@@ -53,151 +53,7 @@ public unsafe struct GPT2 {
             }
         }
     }
-
-    public static unsafe void layernorm_forward(float* _Out, float* _Mean, float* _Rstd,
-        float* _In, float* _Weight, float* _Bias, int B, int T, int C) {
-
-        Parallel.For(0, B * T, (bt) => {
-            layernorm_forward_kernel(
-                bt,
-                _Out,
-                _Mean,
-                _Rstd,
-                _In,
-                _Weight,
-                _Bias,
-                T,
-                B,
-                C);
-        });
-    }
-
-    static unsafe void layernorm_forward_kernel(int bt, float* _Out, float* _Mean, float* _Rstd,
-        float* _In, float* _Weight, float* _Bias, int B, int T, int C) {
-
-        /* See https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html */
-
-        int b = bt / T;
-        int t = bt % T;
-
-        float eps = 1e-5f;
-
-        float* x = _In + b * T * C + t * C;
-
-        // calculate the mean
-        double mean = 0.0;
-        for (int i = 0; i < C; i++) {
-            mean += x[i];
-        }
-        mean = mean / C;
-
-        // calculate the variance (without any bias correction)
-        double variance = 0.0;
-        for (int i = 0; i < C; i++) {
-            double xshift = x[i] - mean;
-            variance += xshift * xshift;
-        }
-        variance = variance / C;
-
-        // calculate the rstd (reciprocal standard deviation)
-        double s = 1.0 / Math.Sqrt(variance + eps);
-
-        float* y = _Out + b * T * C + t * C;
-
-        for (int i = 0; i < C; i++) {
-            double n = (s * (x[i] - mean)); // normalize
-            double o = n * _Weight[i] + _Bias[i]; // scale and shift
-            y[i] = (float)o; // write
-        }
-
-        // cache the mean and rstd for the backward pass later
-        _Mean[b * T + t] = (float)mean;
-        _Rstd[b * T + t] = (float)s;
-    }
-
-    static void layernorm_backward_kernel1(int bt, float* dinp, float* dweight, float* dbias,
-                        float* dout, float* inp, float* weight, float* mean, float* rstd,
-                        int B, int T, int C) {
-
-        int b = bt / T;
-        int t = bt % T;
-
-        float* dout_bt = dout + b * T * C + t * C;
-        float* inp_bt = inp + b * T * C + t * C;
-        float* dinp_bt = dinp + b * T * C + t * C;
-        float mean_bt = mean[b * T + t];
-        float rstd_bt = rstd[b * T + t];
-
-        // first: two reduce operations
-        float dnorm_mean = 0.0f;
-        float dnorm_norm_mean = 0.0f;
-        for (int i = 0; i < C; i++) {
-            float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
-            float dnorm_i = weight[i] * dout_bt[i];
-            dnorm_mean += dnorm_i;
-            dnorm_norm_mean += dnorm_i * norm_bti;
-        }
-        dnorm_mean = dnorm_mean / C;
-        dnorm_norm_mean = dnorm_norm_mean / C;
-
-        // now iterate again and accumulate all the gradients
-        for (int i = 0; i < C; i++) {
-            float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
-            float dnorm_i = weight[i] * dout_bt[i];
-            // gradient contribution to bias
-            // atomicAdd(&dbias[i], dout_bt[i]);
-            dbias[i] += dout_bt[i];
-            // gradient contribution to weight
-            // atomicAdd(&dweight[i], norm_bti * dout_bt[i]);
-            dweight[i] += norm_bti * dout_bt[i];
-            // gradient contribution to input
-            float dval = 0.0f;
-            dval += dnorm_i; // term 1
-            dval -= dnorm_mean; // term 2
-            dval -= norm_bti * dnorm_norm_mean; // term 3
-            dval *= rstd_bt; // final scale
-            dinp_bt[i] += dval;
-        }
-    }
-
-    static unsafe void layernorm_backward(float* dinp, float* dweight, float* dbias,
-                        float* dout, float* inp, float* weight, float* mean, float* rstd,
-                        int B, int T, int C) {
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                layernorm_backward_kernel1(
-                    b * T + t,
-                    dinp, dweight, dbias,
-                    dout, inp, weight, mean, rstd,
-                    B, T, C);
-            }
-        }
-    }
-
-    private static void matmul_forward_kernel(int bt,
-                                              float* _Out,
-                                              float* _In,
-                                              float* _Weight,
-                                              float* _Bias,
-                                              int T,
-                                              int C,
-                                              int OC) {
-
-        int b = bt / T;
-        int t = bt % T;
-
-        float* x = _In + b * T * C + t * C;
-        float* y = _Out + b * T * OC + t * OC;
-        for (int o = 0; o < OC; o++) {
-            double val = (_Bias != null) ? _Bias[o] : 0.0f;
-            float* w = _Weight + o * C;
-            for (int i = 0; i < C; i++) {
-                val += x[i] * w[i];
-            }
-            y[o] = (float)val;
-        }
-    }
-
+     
     public static unsafe void matmul_forward(float* _Out,
                                              float* _In,
                                              float* _Weight,
@@ -206,22 +62,15 @@ public unsafe struct GPT2 {
                                              int T,
                                              int C,
                                              int OC) {
-        Parallel.For(0, B * T, (bt) => {
-
-            int b = bt / T;
-            int t = bt % T;
-            Debug.Assert(b * T + t == bt);
-
-            matmul_forward_kernel(
-                bt,
-                _Out,
-                _In,
-                _Weight,
-                _Bias,
-                T,
-                C,
-                OC);
-        });
+        global::MatMul.matmul_forward_cpu_2(
+            _Out,
+            _In,
+            _Weight,
+            _Bias,
+            B,
+            T,
+            C,
+            OC);
     }
 
     static unsafe void matmul_backward_cpu(float* dinp, float* dweight, float* dbias,
@@ -892,19 +741,19 @@ public unsafe struct GPT2 {
             float* l_residual3 = acts.residual3 + l * B * T * C;
 
             // now do the forward pass
-            layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+            LayerNorm.layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
             matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3 * C);
             attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
             matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
             residual_forward(l_residual2, residual, l_attproj, B * T * C);
-            layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+            LayerNorm.layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
             matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4 * C);
             gelu_forward(l_fch_gelu, l_fch, B * T * 4 * C);
             matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4 * C, C);
             residual_forward(l_residual3, l_residual2, l_fcproj, B * T * C);
         }
         residual = acts.residual3 + (L - 1) * B * T * C; // last residual is in residual3
-        layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
+        LayerNorm.layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
         matmul_forward(acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
         softmax_forward(acts.probs, acts.logits, B, T, V);
 
@@ -1021,7 +870,17 @@ public unsafe struct GPT2 {
         matmul_backward(grads_acts.lnf, grads.wte, null, grads_acts.logits, acts.lnf, params_.wte, B, T, C, V);
         float* residual = acts.residual3 + (L - 1) * B * T * C; // last layer's residual
         float* dresidual = grads_acts.residual3 + (L - 1) * B * T * C; // write to last layer's residual
-        layernorm_backward(dresidual, grads.lnfw, grads.lnfb, grads_acts.lnf, residual, params_.lnfw, acts.lnf_mean, acts.lnf_rstd, B, T, C);
+        LayerNorm.layernorm_backward(dresidual,
+                                     grads.lnfw,
+                                     grads.lnfb,
+                                     grads_acts.lnf,
+                                     residual,
+                                     params_.lnfw,
+                                     acts.lnf_mean,
+                                     acts.lnf_rstd,
+                                     B,
+                                     T,
+                                     C);
 
         for (int l = L - 1; l >= 0; l--) {
 
@@ -1080,12 +939,12 @@ public unsafe struct GPT2 {
             matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, B, T, 4 * C, C);
             gelu_backward(dl_fch, l_fch, dl_fch_gelu, B * T * 4 * C);
             matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, B, T, C, 4 * C);
-            layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
+            LayerNorm.layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
             residual_backward(dresidual, dl_attproj, dl_residual2, B * T * C);
             matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, B, T, C, C);
             attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, B, T, C, NH);
             matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, B, T, C, 3 * C);
-            layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
+            LayerNorm.layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
         }
         encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, model->inputs, B, T, C);
     }
