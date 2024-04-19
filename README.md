@@ -4,7 +4,7 @@ This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CU
 
 ## notes
 
-The C#/CPU port is numerically identical to the C/CPU version.
+The C#/CPU port is numerically identical to the C/CPU version. I'm currently porting the CUDA version which should be as fast as the original C/CUDA ✌️
 
 ## branches
 
