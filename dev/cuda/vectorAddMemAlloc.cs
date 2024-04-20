@@ -1,22 +1,49 @@
 using System;
 using System.IO;
-
-using static kernel32;
+using System.Runtime.InteropServices;
+using System.Text;
 using static cuda;
-using static stdio;
+using static nvrtc;
+using static std;
 
-unsafe static class vectorAdd {
-#if vectorAdd
+unsafe static class vectorAddMemAlloc {
+#if vectorAddMemAlloc
     static unsafe int Main() {
+
+        string fileName = ".\\dev\\cuda\\vectorAdd_kernel64.cu";
+
+        byte[] ptx = compile(File.ReadAllText(fileName), "vectorAdd_kernel64");
+
         checkCudaErrors(cuInit());
 
-        checkCudaErrors(cuDeviceGet(out var device, 0));
+        checkCudaErrors(cuDeviceGet(out var dev, 0));
 
-        checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, device));
+        checkCudaErrors(cuDeviceGetAttribute(out int pi, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY, dev));
+
+        // get compute capabilities and the devicename
+        checkCudaErrors(cuDeviceGetAttribute(
+            out int major, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev));
+        checkCudaErrors(cuDeviceGetAttribute(
+            out int minor, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev));
+
+        byte* devName = (byte*)malloc(256 + 1);
+
+        checkCudaErrors(cuDeviceGetName(devName, 256, dev));
+
+        devName[256] = (byte)'\0';
+
+        printf("> GPU Device %s has SM %d.%d compute capability\n",
+            Marshal.PtrToStringAnsi((IntPtr)devName),
+            major,
+            minor);
+
+        free(devName);
+
+        checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
 
         checkCudaErrors(cuCtxSetCurrent(ctx));
 
-        checkCudaErrors(cuModuleLoadData(out var cuModule, File.ReadAllBytes(".\\dev\\cuda\\vectorAdd_kernel64.fatbin")));
+        checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
 
         checkCudaErrors(cuModuleGetFunction(out var vecAdd_kernel, cuModule, "VecAdd_kernel"));
 
@@ -37,8 +64,8 @@ unsafe static class vectorAdd {
         checkCudaErrors(cuMemcpyHtoD_v2(d_A, h_A, (ulong)N * sizeof(float)));
         checkCudaErrors(cuMemcpyHtoD_v2(d_B, h_B, (ulong)N * sizeof(float)));
 
-        uint threadsPerBlock     = (uint)256;
-        uint blocksPerGrid       = (uint)((N + threadsPerBlock - 1) / threadsPerBlock);
+        uint threadsPerBlock = (uint)256;
+        uint blocksPerGrid = (uint)((N + threadsPerBlock - 1) / threadsPerBlock);
 
         void*[] args = { &d_A, &d_B, &d_C, &N };
 
@@ -47,7 +74,7 @@ unsafe static class vectorAdd {
             vecAdd_kernel,
             blocksPerGrid, 1, 1,
             threadsPerBlock, 1, 1, 0,
-            CUstream.NULL,
+            IntPtr.Zero,
             args,
             null));
 

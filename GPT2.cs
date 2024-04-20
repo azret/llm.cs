@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 
 using static kernel32;
 using static math;
-using static stdio;
+using static std;
 
 public unsafe struct GPT2 {
     // ----------------------------------------------------------------------------

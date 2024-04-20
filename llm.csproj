@@ -34,7 +34,7 @@
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;vectorAddHostAlloc</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;vectorAddMemAlloc</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -70,8 +70,9 @@
     <Compile Include="include\math.cs" />
     <Compile Include="include\cuda.cs" />
     <Compile Include="GPT2.cs" />
-    <Compile Include="dev\cuda\vectorAdd.cs" />
-    <Compile Include="include\stdio.cs" />
+    <Compile Include="dev\cuda\vectorAddMemAlloc.cs" />
+    <Compile Include="include\nvrtc.cs" />
+    <Compile Include="include\std.cs" />
     <Compile Include="include\time.cs" />
     <Compile Include="train_gpt2.cs" />
     <Compile Include="test_gpt2.cs" />
@@ -80,7 +81,9 @@
   <ItemGroup>
     <None Include="App.config" />
     <Compile Include="dev\cpu\MatMul.cs" />
-    <None Include="dev\cuda\vectorAdd_kernel64.cu" />
+    <None Include="dev\cuda\vectorAdd_kernel64.cu">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Include="dev\cuda\vectorAdd_kernel64.fatbin" />
   </ItemGroup>
   <ItemGroup>

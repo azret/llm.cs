@@ -5,7 +5,7 @@ using static kernel32;
 using static GPT2;
 using static math;
 using static time;
-using static stdio;
+using static std;
 
 unsafe class test_gpt2 {
     static bool check_tensor(float* a, float* b, int n, string label) {

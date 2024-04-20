@@ -6,7 +6,7 @@ using System.Security;
 
 using static kernel32;
 
-internal static class stdio {
+internal static class std {
 
     public static void fclose(IntPtr hFile) {
         CloseHandle(hFile);
@@ -82,17 +82,9 @@ internal static class stdio {
         return ((long)highSize << 32) | (uint)lowSize;
     }
 
-    public static unsafe void* malloc(int size) {
-        return (void*)Marshal.AllocHGlobal(size);
-    }
-
-    public static unsafe void memcpy(void* destination, void* source, int size) {
-        CopyMemory(destination, source, size);
-    }
-
-    public static unsafe void memset(void* destination, byte fill, int size) {
-        FillMemory(destination, size, fill);
-    }
+    public static unsafe void* malloc(int size) => (void*)Marshal.AllocHGlobal(size);
+    public static unsafe void memcpy(void* destination, void* source, int size) => CopyMemory(destination, source, size);
+    public static unsafe void memset(void* destination, byte fill, int size) => FillMemory(destination, size, fill);
 
     public static void printf(string fmt, params object[] args) {
         for (int i = 0; i < args.Length; i++) {

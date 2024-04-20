@@ -2,7 +2,7 @@ using System;
 using System.IO;
 
 using static cuda;
-using static stdio;
+using static std;
 
 unsafe static class vectorAddHostAlloc {
 

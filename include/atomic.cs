@@ -2,7 +2,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 
-using static stdio;
+using static std;
 using static Common;
 
 public static unsafe class atomic {

@@ -1,6 +1,6 @@
 ﻿using System;
 
-using static stdio;
+using static std;
 
 internal static class Common {
 
