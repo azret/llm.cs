@@ -6,7 +6,7 @@ internal static class Common {
 
     public static unsafe float* malloc_random_float(ulong* seed, int N) {
         float* h_out = (float*)malloc(N * sizeof(float));
-        for (int i = 0; i < N; i++) { h_out[i] = math.randf(seed); }
+        for (int i = 0; i < N; i++) { h_out[i] = randf(seed); }
         return h_out;
     }
 

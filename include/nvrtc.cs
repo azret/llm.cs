@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class nvrtc {
     public static byte[] compile(string src, string name) {
@@ -9,7 +10,7 @@ public static class nvrtc {
             src, name, 0, null, null));
 
         try {
-            nvrtcCheck(nvrtcCompileProgram(prog, 0, null));
+            var res = nvrtcCompileProgram(prog, 0, null);
 
             nvrtcCheck(nvrtcGetProgramLogSize(prog, out IntPtr logSizeRet));
 
@@ -19,11 +20,13 @@ public static class nvrtc {
 
             nvrtcCheck(nvrtcGetProgramLog(prog, log));
 
-            // var msg = Encoding.UTF8.GetString(log);
-            // 
-            // if (!string.IsNullOrWhiteSpace(msg)) {
-            //     printf("%s\n", msg);
-            // }
+            var msg = Encoding.UTF8.GetString(log);
+
+            if (!string.IsNullOrWhiteSpace(msg)) {
+                Console.WriteLine(msg);
+            }
+
+            nvrtcCheck(res);
 
             nvrtcCheck(nvrtcGetPTXSize(prog, out IntPtr ptxSizeRet));
 

@@ -34,7 +34,7 @@
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;vectorAddMemAlloc</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;matmul_forward</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -64,6 +64,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="dev\cuda\vectorAddHostAlloc.cs" />
+    <Compile Include="dev\cuda\matmul_forward.cs" />
     <Compile Include="include\atomic.cs" />
     <Compile Include="dev\cpu\Common.cs" />
     <Compile Include="dev\cpu\layernorm_backward.cs" />
@@ -81,6 +82,9 @@
   <ItemGroup>
     <None Include="App.config" />
     <Compile Include="dev\cpu\MatMul.cs" />
+    <None Include="dev\cuda\matmul_forward.cu">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Include="dev\cuda\vectorAdd_kernel64.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
