@@ -1,11 +1,11 @@
 ﻿using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
 using static kernel32;
 using static math;
+using static stdio;
 
 public unsafe struct GPT2 {
     // ----------------------------------------------------------------------------
@@ -490,6 +490,7 @@ public unsafe struct GPT2 {
     public int batch_size; // the batch size (B) of current forward pass
     public int seq_len; // the sequence length (T) of current forward pass
     public int* inputs; // the input tokens for the current forward pass
+    public int* P_inputs;
     public int* targets; // the target tokens for the current forward pass
     public float mean_loss; // after a forward pass with targets, will be populated with the mean loss
 
@@ -501,7 +502,7 @@ public unsafe struct GPT2 {
             num_parameters += param_sizes[i];
         }
         // malloc all parameters all at once
-        float* params_memory = (float*)Marshal.AllocHGlobal(num_parameters * sizeof(float));
+        float* params_memory = (float*)malloc(num_parameters * sizeof(float));
         // assign all the tensors
         float**[] ptrs = {
             &params_->wte, &params_->wpe, &params_->ln1w, &params_->ln1b, &params_->qkvw, &params_->qkvb,
@@ -515,7 +516,8 @@ public unsafe struct GPT2 {
         }
         return params_memory;
     }
-
+    // We need to ensure memory is aligned to 4K (so we will need to padd memory
+    // accordingly)
     public static unsafe float* malloc_and_point_activations(ActivationTensors* acts, int* act_sizes) {
         int num_activations = 0;
         for (int i = 0; i < ActivationTensors.NUM_ACTIVATION_TENSORS; i++) {
@@ -538,11 +540,10 @@ public unsafe struct GPT2 {
 
     public static unsafe void gpt2_build_from_checkpoint(GPT2* model, string checkpoint_path) {
         // read in model from a checkpoint file
-        using (SafeFileHandle model_file = new SafeFileHandle(
-stdio.fopen(checkpoint_path, "rb"), true)) {
+        using (SafeFileHandle model_file = new SafeFileHandle(fopen(checkpoint_path, "rb"), true)) {
 
             int[] model_header = new int[256];
-            stdio.fread(model_header, model_file.DangerousGetHandle());
+            fread(model_header, model_file.DangerousGetHandle());
             if (model_header[0] != 20240326) { throw new Exception("Bad magic model file"); }
             if (model_header[1] != 1) { throw new Exception("Bad version in model file"); }
 
@@ -589,7 +590,8 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
 
             // read in all the parameters from file
             model->params_memory = malloc_and_point_parameters(&model->params_, model->param_sizes);
-            stdio.fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
+
+            fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
 
             // other inits
             model->acts_memory = null;
@@ -598,6 +600,7 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
             model->v_memory = null;
             model->grads_acts_memory = null;
             model->inputs = null;
+            model->P_inputs = null;
             model->targets = null;
             model->batch_size = 0;
             model->seq_len = 0;
@@ -606,14 +609,14 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
     }
 
     public static unsafe void gpt2_free(GPT2* model) {
-        Marshal.FreeHGlobal((IntPtr)model->params_memory);
-        Marshal.FreeHGlobal((IntPtr)model->grads_memory);
-        Marshal.FreeHGlobal((IntPtr)model->m_memory);
-        Marshal.FreeHGlobal((IntPtr)model->v_memory);
-        Marshal.FreeHGlobal((IntPtr)model->acts_memory);
-        Marshal.FreeHGlobal((IntPtr)model->grads_acts_memory);
-        Marshal.FreeHGlobal((IntPtr)model->inputs);
-        Marshal.FreeHGlobal((IntPtr)model->targets);
+        free(model->params_memory);
+        free(model->grads_memory);
+        free(model->m_memory);
+        free(model->v_memory);
+        free(model->acts_memory);
+        free(model->grads_acts_memory);
+        free(model->P_inputs);
+        free(model->targets);
         model->params_memory = null;
         model->grads_memory = null;
         model->m_memory = null;
@@ -621,12 +624,13 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
         model->acts_memory = null;
         model->grads_acts_memory = null;
         model->inputs = null;
+        model->P_inputs = null;
         model->targets = null;
     }
 
     public static void gpt2_zero_grad(GPT2* model) {
-        if (model->grads_memory != null) { stdio.memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
-        if (model->grads_acts_memory != null) { stdio.memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
+        if (model->grads_memory != null) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
+        if (model->grads_acts_memory != null) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
     }
 
     public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -679,9 +683,16 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
             Console.Write("num_activations: {0}\n", num_activations);
             model->num_activations = num_activations;
             model->acts_memory = malloc_and_point_activations(&model->acts, model->act_sizes);
-            // also create memory for caching inputs and targets
-            model->inputs = (int*)Marshal.AllocHGlobal(B * T * sizeof(int));
-            model->targets = (int*)Marshal.AllocHGlobal(B * T * sizeof(int)); // might be unused if we never have targets but it's small
+
+            // create memory for caching inputs and targets
+
+            model->P_inputs = (int*)malloc(B * T * sizeof(int) + cuda.MEMORY_ALIGNMENT);
+            model->inputs = (int*)cuda.MEMORY_ALIGN_UP(model->P_inputs, cuda.MEMORY_ALIGNMENT);
+
+            model->targets = (int*)malloc(B * T * sizeof(int) + cuda.MEMORY_ALIGNMENT);
+
+            cuda.CHECK_ALIGNMENT(model->inputs);
+
         } else {
             // validate B,T is consistent with how we've allocated the memory before
             // in principle we could get more clever here in the future, for now this is safest
@@ -694,16 +705,16 @@ stdio.fopen(checkpoint_path, "rb"), true)) {
         }
 
         // cache the inputs/targets
-        CopyMemory(model->inputs, inputs, B * T * sizeof(int));
+        memcpy(model->inputs, inputs, B * T * sizeof(int));
         if (targets != null) {
-            CopyMemory(model->targets, targets, B * T * sizeof(int));
+            memcpy(model->targets, targets, B * T * sizeof(int));
         }
 
         // forward pass
         ParameterTensors params_ = model->params_; // for brevity
         ActivationTensors acts = model->acts;
         float* residual;
-        encoder_forward(acts.encoded, inputs, params_.wte, params_.wpe, B, T, C); // encoding goes into residual[0]
+        encoder_forward(acts.encoded, model->inputs, params_.wte, params_.wpe, B, T, C); // encoding goes into residual[0]
         for (int l = 0; l < L; l++) {
 
             residual = l == 0 ? acts.encoded : acts.residual3 + (l - 1) * B * T * C;

@@ -2,9 +2,54 @@
 using System.Runtime.InteropServices;
 
 public static class cuda {
+    public enum nvrtcResult : int {
+        NVRTC_SUCCESS = 0,
+        NVRTC_ERROR_OUT_OF_MEMORY = 1,
+        NVRTC_ERROR_PROGRAM_CREATION_FAILURE = 2,
+        NVRTC_ERROR_INVALID_INPUT = 3,
+        NVRTC_ERROR_INVALID_PROGRAM = 4,
+        NVRTC_ERROR_INVALID_OPTION = 5,
+        NVRTC_ERROR_COMPILATION = 6,
+        NVRTC_ERROR_BUILTIN_OPERATION_FAILURE = 7,
+        NVRTC_ERROR_NO_NAME_EXPRESSIONS_AFTER_COMPILATION = 8,
+        NVRTC_ERROR_NO_LOWERED_NAMES_BEFORE_COMPILATION = 9,
+        NVRTC_ERROR_NAME_EXPRESSION_NOT_VALID = 10,
+        NVRTC_ERROR_INTERNAL_ERROR = 11,
+        NVRTC_ERROR_TIME_FILE_WRITE_FAILED = 12
+    }
+
+    // [MarshalAs(UnmanagedType.LPStr)] string name
+    // [DllImport("nvcuda")]
+    // nvrtcResult nvrtcCreateProgram(nvrtcProgram* prog,
+    //                            const char* src,
+    //                            const char* name,
+    //                            int numHeaders,
+    //                            const char* const * headers,
+    //                            const char* const * includeNames);
+
+    // public static extern nvrtcResult nvrtcCreateProgram(out IntPtr prog,
+    //                    [MarshalAs(UnmanagedType.LPStr)] string src,
+    //                    [MarshalAs(UnmanagedType.LPStr)] string name,
+    //                    int numHeaders,
+    //                    IntPtr[] headers,
+    //                    IntPtr[] includeNames);
+
     static cuda() {
         if (IntPtr.Size != 8) {
             throw new InvalidProgramException();
+        }
+    }
+
+    public const int MEMORY_ALIGNMENT = 4096;
+
+    // Macro to aligned up to the memory
+    public static unsafe void* MEMORY_ALIGN_UP(void* p, ulong size) {
+        return (void*)(((ulong)p + (size - 1)) & (~(size - 1)));
+    }
+
+    public static unsafe void CHECK_ALIGNMENT(void* p) {
+        if ((ulong)MEMORY_ALIGN_UP(p, MEMORY_ALIGNMENT) != (ulong)p) {
+            throw new Exception();
         }
     }
 
@@ -676,18 +721,11 @@ public static class cuda {
     [DllImport("nvcuda")]
     public static extern unsafe CUresult cuGetErrorString(CUresult error, out IntPtr pStr);
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUdevice_v1 {
-        private int _handle;
-        public int Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
+    [DllImport("nvcuda")]
+    public static extern unsafe CUresult cuDeviceGetName(byte* name, int len, int dev);
 
     [DllImport("nvcuda")]
-    public static extern unsafe CUresult cuDeviceGet(out CUdevice_v1 device, int ordinal);
+    public static extern unsafe CUresult cuDeviceGet(out int dev, int ordinal);
 
     /**
      * Device properties
@@ -837,33 +875,13 @@ public static class cuda {
     }
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuDeviceGetAttribute(out int pi, CUdevice_attribute attrib, CUdevice_v1 dev);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUdeviceptr_v2 {
-        private IntPtr _handle;
-        public IntPtr Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUcontext {
-        private IntPtr _handle;
-        public IntPtr Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
+    public static extern CUresult cuDeviceGetAttribute(out int pi, CUdevice_attribute attrib, int dev);
 
     [DllImport("nvcuda")]
     public static extern CUresult cuCtxGetCurrent(out IntPtr pctx);
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuCtxSetCurrent(CUcontext ctx);
+    public static extern CUresult cuCtxSetCurrent(IntPtr ctx);
 
     /**
      * Context creation flags
@@ -885,10 +903,16 @@ public static class cuda {
     }
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuCtxCreate_v2(out CUcontext pctx, CUctx_flags flags, CUdevice_v1 dev);
+    public static extern unsafe CUresult cuCtxCreate_v2(out IntPtr pctx, CUctx_flags flags, int dev);
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuCtxDestroy_v2(CUcontext ctx);
+    public static extern CUresult cuCtxDestroy_v2(IntPtr ctx);
+
+    [DllImport("nvcuda")]
+    public static extern unsafe CUresult cuMemAllocHost_v2(void** dptr, ulong bytesize);
+
+    [DllImport("nvcuda")]
+    public static extern unsafe CUresult cuMemFreeHost(void* dptr);
 
     [DllImport("nvcuda")]
     public static extern unsafe CUresult cuMemAlloc_v2(out IntPtr dptr, ulong bytesize);
@@ -901,16 +925,6 @@ public static class cuda {
 
     [DllImport("nvcuda")]
     public static extern unsafe CUresult cuMemcpyDtoH_v2(void* dstHost, IntPtr srcDevice, ulong ByteCount);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUmodule {
-        private IntPtr _handle;
-        public IntPtr Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
 
     /**
      * If set, host memory is portable between CUDA contexts.
@@ -964,38 +978,16 @@ public static class cuda {
     public static extern CUresult cuCtxSynchronize();
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuModuleLoadData(out CUmodule module, byte[] image);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUfunction {
-        private IntPtr _handle;
-        public IntPtr Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
+    public static extern CUresult cuModuleLoadData(out IntPtr module, byte[] image);
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuModuleGetFunction(out CUfunction hfunc, CUmodule hmod, [MarshalAs(UnmanagedType.LPStr)] string name);
+    public static extern CUresult cuModuleGetFunction(out IntPtr hfunc, IntPtr hmod, [MarshalAs(UnmanagedType.LPStr)] string name);
 
     [DllImport("nvcuda")]
-    public static extern CUresult cuModuleGetFunctionCount(out uint count, CUmodule hmod);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CUstream {
-        public static CUstream NULL = new CUstream();
-
-        private IntPtr _handle;
-        public IntPtr Handle {
-            get {
-                return _handle;
-            }
-        }
-    }
+    public static extern CUresult cuModuleGetFunctionCount(out uint count, IntPtr hmod);
 
     [DllImport("nvcuda")]
     public static extern unsafe CUresult cuLaunchKernel(
-        CUfunction f, uint gridDimX, uint gridDimY, uint gridDimZ, uint blockDimX, uint blockDimY, uint blockDimZ,
-        uint sharedMemBytes, CUstream hStream, void*[] kernelParams, void*[] extra);
+        IntPtr f, uint gridDimX, uint gridDimY, uint gridDimZ, uint blockDimX, uint blockDimY, uint blockDimZ,
+        uint sharedMemBytes, IntPtr hStream, void*[] kernelParams, void*[] extra);
 }
