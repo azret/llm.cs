@@ -4,9 +4,7 @@ This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CU
 
 ## notes
 
-The C#/CPU port is numerically identical to the C/CPU version. Current best run is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized.
-
-✌️
+The C#/CPU port is numerically identical to the C/CPU version. Current best run on a CPU is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized. ✌️
 
 ```c
 [GPT-2]
@@ -90,7 +88,7 @@ overall okay: False
 
     https://github.com/azret/llm.cs/tree/master
 
-2. Initial C/CPU -> C#/CPU Port.
+2. Initial C/CPU to C#/CPU reference Port.
 
     https://github.com/azret/llm.cs/tree/reference
 
