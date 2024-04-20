@@ -3,6 +3,7 @@ using System.IO;
 
 using static kernel32;
 using static cuda;
+using static stdio;
 
 unsafe static class vectorAdd {
 #if vectorAdd

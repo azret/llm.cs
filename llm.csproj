@@ -32,9 +32,9 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
-    <Optimize>true</Optimize>
+    <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;test_gpt2</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;vectorAddZeroCopy</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -63,6 +63,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="dev\cuda\vectorAddZeroCopy.cs" />
     <Compile Include="include\atomic.cs" />
     <Compile Include="dev\cpu\Common.cs" />
     <Compile Include="dev\cpu\layernorm_backward.cs" />
