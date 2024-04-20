@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
 using static kernel32;
-using static MathF;
+using static math;
 
 public unsafe struct GPT2 {
     // ----------------------------------------------------------------------------
@@ -539,10 +539,10 @@ public unsafe struct GPT2 {
     public static unsafe void gpt2_build_from_checkpoint(GPT2* model, string checkpoint_path) {
         // read in model from a checkpoint file
         using (SafeFileHandle model_file = new SafeFileHandle(
-            fopen(checkpoint_path, "rb"), true)) {
+stdio.fopen(checkpoint_path, "rb"), true)) {
 
             int[] model_header = new int[256];
-            fread(model_header, model_file.DangerousGetHandle());
+            stdio.fread(model_header, model_file.DangerousGetHandle());
             if (model_header[0] != 20240326) { throw new Exception("Bad magic model file"); }
             if (model_header[1] != 1) { throw new Exception("Bad version in model file"); }
 
@@ -589,7 +589,7 @@ public unsafe struct GPT2 {
 
             // read in all the parameters from file
             model->params_memory = malloc_and_point_parameters(&model->params_, model->param_sizes);
-            fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
+            stdio.fread(model->params_memory, sizeof(float), num_parameters, model_file.DangerousGetHandle());
 
             // other inits
             model->acts_memory = null;
@@ -625,8 +625,8 @@ public unsafe struct GPT2 {
     }
 
     public static void gpt2_zero_grad(GPT2* model) {
-        if (model->grads_memory != null) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
-        if (model->grads_acts_memory != null) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
+        if (model->grads_memory != null) { stdio.memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
+        if (model->grads_acts_memory != null) { stdio.memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
     }
 
     public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -741,19 +741,19 @@ public unsafe struct GPT2 {
             float* l_residual3 = acts.residual3 + l * B * T * C;
 
             // now do the forward pass
-            LayerNorm.layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+            layernorm_backward.layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
             matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3 * C);
             attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
             matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
             residual_forward(l_residual2, residual, l_attproj, B * T * C);
-            LayerNorm.layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+            layernorm_backward.layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
             matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4 * C);
             gelu_forward(l_fch_gelu, l_fch, B * T * 4 * C);
             matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4 * C, C);
             residual_forward(l_residual3, l_residual2, l_fcproj, B * T * C);
         }
         residual = acts.residual3 + (L - 1) * B * T * C; // last residual is in residual3
-        LayerNorm.layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
+        layernorm_backward.layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
         matmul_forward(acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
         softmax_forward(acts.probs, acts.logits, B, T, V);
 
@@ -870,7 +870,7 @@ public unsafe struct GPT2 {
         matmul_backward(grads_acts.lnf, grads.wte, null, grads_acts.logits, acts.lnf, params_.wte, B, T, C, V);
         float* residual = acts.residual3 + (L - 1) * B * T * C; // last layer's residual
         float* dresidual = grads_acts.residual3 + (L - 1) * B * T * C; // write to last layer's residual
-        LayerNorm.layernorm_backward_0(dresidual,
+        layernorm_backward.layernorm_backward_0(dresidual,
                                      grads.lnfw,
                                      grads.lnfb,
                                      grads_acts.lnf,
@@ -939,12 +939,12 @@ public unsafe struct GPT2 {
             matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, B, T, 4 * C, C);
             gelu_backward(dl_fch, l_fch, dl_fch_gelu, B * T * 4 * C);
             matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, B, T, C, 4 * C);
-            LayerNorm.layernorm_backward_0(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
+            layernorm_backward.layernorm_backward_0(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
             residual_backward(dresidual, dl_attproj, dl_residual2, B * T * C);
             matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, B, T, C, C);
             attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, B, T, C, NH);
             matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, B, T, C, 3 * C);
-            LayerNorm.layernorm_backward_0(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
+            layernorm_backward.layernorm_backward_0(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
         }
         encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, model->inputs, B, T, C);
     }

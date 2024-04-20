@@ -1,11 +1,12 @@
 ﻿using System;
-using static kernel32;
+
+using static stdio;
 
 internal static class Common {
 
     public static unsafe float* malloc_random_float(ulong* seed, int N) {
         float* h_out = (float*)malloc(N * sizeof(float));
-        for (int i = 0; i < N; i++) { h_out[i] = MathF.randf(seed); }
+        for (int i = 0; i < N; i++) { h_out[i] = math.randf(seed); }
         return h_out;
     }
 
@@ -20,9 +21,9 @@ internal static class Common {
         printf("%s:\n", name);
         for (int i = 0; i < num_elements; i++) {
             // print the first few comparisons
-            // if (i < 3) {
-            //     printf("%f %f\n", cpu_reference[i], device_result[i]);
-            // }
+            if (i < 3) {
+                printf("%f6 %f6\n", cpu_reference[i], device_result[i]);
+            }
             // ensure correctness for all elements
             if (Math.Abs(cpu_reference[i] - device_result[i]) > tolerance) {
                 Console.BackgroundColor = ConsoleColor.Red;

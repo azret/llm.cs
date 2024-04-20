@@ -6,8 +6,8 @@ using Microsoft.Win32.SafeHandles;
 
 unsafe class train_gpt2 {
     public struct timespec {
-        public long tv_sec;  // Seconds - >= 0
-        public long tv_nsec; // Nanoseconds - [0, 999999999]
+        public long tv_sec;
+        public long tv_nsec;
     };
 
     public const int CLOCK_MONOTONIC = 0;
@@ -39,8 +39,8 @@ unsafe class train_gpt2 {
             loader->T = T;
 
             // open the input file for reading
-            loader->tokens_file = kernel32.fopen(filename, "rb");
-            loader->file_size = kernel32.fsize(loader->tokens_file);
+            loader->tokens_file = stdio.fopen(filename, "rb");
+            loader->file_size = stdio.fsize(loader->tokens_file);
             if (loader->file_size < (B * T + 1) * sizeof(int)) {
                 throw new Exception("Error: file size is too small for the batch size and sequence length");
             }
@@ -65,19 +65,18 @@ unsafe class train_gpt2 {
             if (loader->current_position + (B * T + 1) * sizeof(int) > loader->file_size) {
                 loader->current_position = 0;
             }
-            // read the B*T+1 integers from the file into batch
-            kernel32.fseek(loader->tokens_file, loader->current_position, SeekOrigin.Begin);
-            kernel32.fread(loader->batch, sizeof(int), B * T + 1, loader->tokens_file);
+            stdio.fseek(loader->tokens_file, loader->current_position, SeekOrigin.Begin);
+            stdio.fread(loader->batch, sizeof(int), B * T + 1, loader->tokens_file);
             // advance the current position by B*T integers
             loader->current_position += B * T * sizeof(int);
-            var current_position = kernel32.fseek(loader->tokens_file, 0, SeekOrigin.Current);
+            var current_position = stdio.fseek(loader->tokens_file, 0, SeekOrigin.Current);
             if (current_position != loader->current_position + sizeof(int)) {
                 throw new IOException("Invalid file operation.");
             }
         }
 
         public static unsafe void dataloader_free(DataLoader* loader) {
-            kernel32.fclose(loader->tokens_file);
+            stdio.fclose(loader->tokens_file);
             loader->tokens_file = IntPtr.Zero;
             Marshal.FreeHGlobal((IntPtr)loader->batch);
             loader->batch = null;
@@ -137,11 +136,11 @@ unsafe class train_gpt2 {
                 return;
             }
 
-            SafeFileHandle file = new SafeFileHandle(kernel32.fopen(filename, "rb"), true);
+            SafeFileHandle file = new SafeFileHandle(stdio.fopen(filename, "rb"), true);
             using (file) {
                 // read in the header
                 uint[] header = new uint[256];
-                kernel32.fread(header, file.DangerousGetHandle());
+                stdio.fread(header, file.DangerousGetHandle());
                 if (header[0] != 20240328) throw new Exception("Tokenizer file is invalid.");
                 if (header[1] != 1) throw new Exception("Tokenizer file is invalid.");
                 tokenizer.vocab_size = (int)header[2];
@@ -151,10 +150,10 @@ unsafe class train_gpt2 {
                 tokenizer.token_table = new byte[tokenizer.vocab_size][];
                 for (int i = 0; i < tokenizer.vocab_size; i++) {
                     byte length;
-                    kernel32.fread(&length, sizeof(byte), 1, file.DangerousGetHandle());
+                    stdio.fread(&length, sizeof(byte), 1, file.DangerousGetHandle());
                     if (length == 0) throw new Exception("Tokenizer file is invalid.");
                     byte[] token_bytes = new byte[length + 1];
-                    kernel32.fread(token_bytes, length, file.DangerousGetHandle());
+                    stdio.fread(token_bytes, length, file.DangerousGetHandle());
                     token_bytes[length] = (byte)'\0';  // Add null terminator for printing
                     tokenizer.token_table[i] = token_bytes;
                 }

@@ -2,11 +2,17 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-using static Common;
-using static kernel32;
-using static MathF;
+using static stdio;
+using static math;
+using static atomic;
 
-public static unsafe class LayerNorm {
+using static Common;
+using System.Diagnostics;
+
+public static unsafe class layernorm_backward {
+
+    //--------------------------------------------------------------
+
     private static void layernorm_backward_kernel_0(int b,
                                                   int t,
                                                   float* dIn,
@@ -79,6 +85,8 @@ public static unsafe class LayerNorm {
         }
     }
 
+    //--------------------------------------------------------------
+
     private static void layernorm_backward_kernel_1(int b,
                                                   int t,
                                                   float* dIn,
@@ -100,11 +108,11 @@ public static unsafe class LayerNorm {
         float _Rstd_bt = _Rstd[b * T + t];
 
         // first: two reduce operations
-        double dnorm_mean = 0.0;
-        double dnorm_norm_mean = 0.0;
+        float dnorm_mean = 0.0f;
+        float dnorm_norm_mean = 0.0f;
         for (int i = 0; i < C; i++) {
-            double norm_bti = (_In_bt[i] - _Mean_bt) * _Rstd_bt;
-            double dnorm_i = _Weight[i] * dOut_bt[i];
+            float norm_bti = (_In_bt[i] - _Mean_bt) * _Rstd_bt;
+            float dnorm_i = _Weight[i] * dOut_bt[i];
             dnorm_mean += dnorm_i;
             dnorm_norm_mean += dnorm_i * norm_bti;
         }
@@ -113,45 +121,45 @@ public static unsafe class LayerNorm {
 
         // now iterate again and accumulate all the gradients
         for (int i = 0; i < C; i++) {
-            double norm_bti = (_In_bt[i] - _Mean_bt) * _Rstd_bt;
-            double dnorm_i = _Weight[i] * dOut_bt[i];
+            float norm_bti = (_In_bt[i] - _Mean_bt) * _Rstd_bt;
+            float dnorm_i = _Weight[i] * dOut_bt[i];
             // gradient contribution to bias
-            // dBias[i] += (float)dOut_bt[i];
-            atomicAdd(&dBias[i], (float)dOut_bt[i]);
+            dBias[i] += (float)dOut_bt[i];
+            // atomicAdd(&dBias[i], dOut_bt[i]);
             // gradient contribution to weight
-            // dWeight[i] += (float)(norm_bti * dOut_bt[i]);
-            atomicAdd(&dWeight[i], (float)(norm_bti * dOut_bt[i]));
+            dWeight[i] += (float)(norm_bti * dOut_bt[i]);
+            //atomicAdd(&dWeight[i], (norm_bti * dOut_bt[i]));
             // gradient contribution to input
-            double dval = 0.0;
+            float dval = 0.0f;
             dval += dnorm_i; // term 1
             dval -= dnorm_mean; // term 2
             dval -= norm_bti * dnorm_norm_mean; // term 3
             dval *= _Rstd_bt; // final scale
-            // _dIn_bt[i] += (float)dval;
-            atomicAdd(&_dIn_bt[i], (float)dval);
+            _dIn_bt[i] += (float)dval;
+            //atomicAdd(&_dIn_bt[i], dval);
         }
     }
 
     public static unsafe void layernorm_backward_1(float* dinp, float* dweight, float* dbias,
                             float* dout, float* inp, float* weight, float* mean, float* rstd,
                             int B, int T, int C) {
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                layernorm_backward_kernel_1(b,
-                                          t,
-                                          dinp,
-                                          dweight,
-                                          dbias,
-                                          dout,
-                                          inp,
-                                          weight,
-                                          mean,
-                                          rstd,
-                                          B,
-                                          T,
-                                          C);
-            }
-        }
+        Parallel.For(0, B * T, (bt) => {
+            int b = bt / T;
+            int t = bt % T;
+            layernorm_backward_kernel_1(b,
+                                      t,
+                                      dinp,
+                                      dweight,
+                                      dbias,
+                                      dout,
+                                      inp,
+                                      weight,
+                                      mean,
+                                      rstd,
+                                      B,
+                                      T,
+                                      C);
+        });
     }
 
     #region forward
@@ -295,28 +303,13 @@ public static unsafe class LayerNorm {
 
     #endregion
 
-    public static unsafe float atomicAdd(float* dest, float val) {
-        int* address = (int*)dest;
-        int old = *address, assumed;
-        do {
-            assumed = old;
-            float desired = (val + *((float*)&assumed));
-            // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-            old = Interlocked.CompareExchange(
-                ref address[0],
-                *((int*)&desired),
-                assumed);
-        } while (assumed != old);
-        return *((float*)&old);
-    }
-
-#if LayerNorm
+#if layernorm_backward
     static int Main() {
-        ulong seed = 37;
+        ulong seed = 113;
 
-        int B = 8;
+        int B = 4;
         int T = 64;
-        int C = 768;
+        int C = 1024;
 
         // backward pass on CPU
 
@@ -346,12 +339,18 @@ public static unsafe class LayerNorm {
         memcpy(CUDA_Mean, h_REF_Mean, B * T * sizeof(float));
         memcpy(CUDA_Rstd, h_REF_Rstd, B * T * sizeof(float));
 
+        var layernorm_backward_0_start = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
+
         for (int n = 0; n < 256; n++) {
             layernorm_backward_0(
                 h_REF_DIn, h_REF_DWeight, h_REF_DBias,
                 h_REF_DOut, h_REF_In, h_REF_Weight, h_REF_Mean, h_REF_Rstd,
                 B, T, C);
         }
+
+        var layernorm_backward_0_end = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
+
+        var layernorm_backward_1_start = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
 
         for (int n = 0; n < 256; n++) {
             layernorm_backward_1(
@@ -360,15 +359,20 @@ public static unsafe class LayerNorm {
                 B, T, C);
         }
 
+        var layernorm_backward_1_end = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
+
+        printf("layernorm_backward_0: %f ms\n", (layernorm_backward_0_end - layernorm_backward_0_start) * 1000);
+        printf("layernorm_backward_1: %f ms\n", (layernorm_backward_1_end - layernorm_backward_1_start) * 1000);
+
         validate_result(CUDA_DOut, h_REF_DOut, "CUDA_DOut", B * T * C, 1e-5f);
         validate_result(CUDA_In, h_REF_In, "CUDA_In", B * T * C, 1e-5f);
         validate_result(CUDA_Weight, h_REF_Weight, "CUDA_Weight", C, 1e-5f);
         validate_result(CUDA_Mean, h_REF_Mean, "CUDA_Mean", B * T, 1e-5f);
         validate_result(CUDA_Rstd, h_REF_Rstd, "CUDA_Rstd", B * T, 1e-5f);
-
-        validate_result(CUDA_DIn, h_REF_DIn, "CUDA_DIn", B * T * C, 1e-4f);
-        validate_result(CUDA_DWeight, h_REF_DWeight, "CUDA_DWeight", C, 1e-4f);
-        validate_result(CUDA_DBias, h_REF_DBias, "CUDA_DBias", C, 1e-4f);
+        
+        validate_result(CUDA_DIn, h_REF_DIn, "CUDA_DIn", B * T * C, 1e-5f);
+        validate_result(CUDA_DWeight, h_REF_DWeight, "CUDA_DWeight", C, 1e-5f);
+        validate_result(CUDA_DBias, h_REF_DBias, "CUDA_DBias", C, 1e-5f);
 
         Console.ReadKey();
 

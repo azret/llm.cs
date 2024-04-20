@@ -1,6 +1,6 @@
 ﻿using System;
 
-public static class MathF {
+public static class math {
     public static unsafe ulong xorshift(ulong* state) {
         /* See href="https://en.wikipedia.org/wiki/Xorshift#xorshift.2A" */
         *state ^= *state >> 12;

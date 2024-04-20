@@ -1,8 +1,8 @@
 ﻿using System;
 using System.Runtime.InteropServices;
 
-public static class nvcuda {
-    static nvcuda() {
+public static class cuda {
+    static cuda() {
         if (IntPtr.Size != 8) {
             throw new InvalidProgramException();
         }

@@ -1,7 +1,7 @@
 using System;
 
 using static kernel32;
-using static MathF;
+using static math;
 
 public static unsafe class MatMul {
 
@@ -110,19 +110,20 @@ public static unsafe class MatMul {
 
     static unsafe void validate_result(float* device_result, float* cpu_reference,
         string name, int num_elements, float tolerance = 1e-4f) {
-        printf("%s:\n", name);
+        stdio.printf("%s:\n", name);
         for (int i = 0; i < num_elements; i++) {
             // print the first few comparisons
             if (i < 5) {
-                printf("%f %f\n", cpu_reference[i], device_result[i]);
+                stdio.printf("%f %f\n", cpu_reference[i], device_result[i]);
             }
             // ensure correctness for all elements
             if (Math.Abs(cpu_reference[i] - device_result[i]) > tolerance) {
-                printf("Mismatch of %s at %d: %f vs %f\n", name, i, cpu_reference[i], device_result[i]);
+                stdio.printf("Mismatch of %s at %d: %f vs %f\n", name, i, cpu_reference[i], device_result[i]);
                 return;
             }
         }
-        printf("OK\n");
+
+        stdio.printf("OK\n");
     }
 
 #if matmul_forward3

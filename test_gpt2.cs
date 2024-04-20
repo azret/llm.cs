@@ -3,7 +3,9 @@ using System.Diagnostics;
 
 using static kernel32;
 using static GPT2;
-using static MathF;
+using static math;
+using static time;
+using static stdio;
 
 unsafe class test_gpt2 {
     static bool check_tensor(float* a, float* b, int n, string label) {
@@ -45,15 +47,6 @@ unsafe class test_gpt2 {
         return ok;
     }
 
-    public struct timespec {
-        public double secs;
-    };
-
-    public const int CLOCK_MONOTONIC = 0;
-    public static unsafe void clock_gettime(int clk_id, timespec* tp) {
-        tp->secs = Stopwatch.GetTimestamp() / (double)TimeSpan.TicksPerSecond;
-    }
-
 #if test_gpt2
     static unsafe void Main(string[] args) {
         // build the GPT-2 model from a checkpoint
@@ -81,11 +74,11 @@ unsafe class test_gpt2 {
         float* expected_grads_memory = malloc_and_point_parameters(&expected_grads, model.param_sizes);
 
         // inputs and expected outputs, only used for error checking
-        int* x = (int*) malloc(B * T * sizeof(int));
-        int* y = (int*) malloc(B * T * sizeof(int));
-        float* expected_logits = (float*) malloc(B * T * V * sizeof(float));
-        float* expected_loss = (float*) malloc(1 * sizeof(float));
-
+        int* x = (int*)malloc(B * T * sizeof(int));
+        int* y = (int*)malloc(B * T * sizeof(int));
+        float* expected_logits = (float*)malloc(B * T * V * sizeof(float));
+        float* expected_loss = (float*)malloc(1 * sizeof(float));
+        
         // read reference information from Python
         fread(x, sizeof(int), B*T, state_file);
         fread(y, sizeof(int), B*T, state_file);
@@ -102,13 +95,13 @@ unsafe class test_gpt2 {
         for (int step = 0; step < 10; step++) {
 
             timespec start, end;
-            clock_gettime(CLOCK_MONOTONIC, &start);
+            getTicks(CLOCK_MONOTONIC, &start);
 
             gpt2_forward(&model, x, y, B, T);
             gpt2_zero_grad(&model);
             gpt2_backward(&model);
 
-            clock_gettime(CLOCK_MONOTONIC, &end);
+            getTicks(CLOCK_MONOTONIC, &end);
 
             if (step == 0) {
                 // error checking at step 0 for reference activations/gradients
@@ -127,6 +120,7 @@ unsafe class test_gpt2 {
                     }
                 }
                 if(logits_ok == 0) { printf("NOT "); }
+
                 printf("OK (LOGITS)\n");
                 allok = allok && logits_ok == 1;
 
@@ -200,6 +194,7 @@ unsafe class test_gpt2 {
         }
         Console.Write("overall okay: {0}", allok);
         Console.ResetColor();
+
 
         // free everything
         free(x);
