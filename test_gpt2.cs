@@ -2,10 +2,12 @@
 using System.Diagnostics;
 
 using static kernel32;
-using static GPT2;
 using static math;
 using static time;
 using static std;
+
+using static train_gpt2;
+using static train_gpt2.GPT2;
 
 unsafe class test_gpt2 {
     // poor man's tensor checker
@@ -78,10 +80,10 @@ unsafe class test_gpt2 {
         float* expected_grads_memory = malloc_and_point_parameters(&expected_grads, model.param_sizes);
 
         // inputs and expected outputs, only used for error checking
-        int* x = (int*)malloc(B * T * sizeof(int));
-        int* y = (int*)malloc(B * T * sizeof(int));
-        float* expected_logits = (float*)malloc(B * T * V * sizeof(float));
-        float* expected_loss = (float*)malloc(1 * sizeof(float));
+        int* x = (int*) malloc(B * T * sizeof(int));
+        int* y = (int*) malloc(B * T * sizeof(int));
+        float* expected_logits = (float*) malloc(B * T * V * sizeof(float));
+        float* expected_loss = (float*) malloc(1 * sizeof(float));
         
         // read reference information from Python
         fread(x, sizeof(int), B*T, state_file);
@@ -94,18 +96,30 @@ unsafe class test_gpt2 {
         // overall OK signal for the test
         bool allok = true;
 
-        // let's do 10 training iterations, following the pytorch code
-        float[] losses = new float[10];
+        // expected losses are as follows, from Python
+        float[] expected_losses = new float[10] {
+            5.270007133483887f,
+            4.059706687927246f,
+            3.3751230239868164f,
+            2.8007826805114746f,
+            2.315382242202759f,
+            1.8490285873413086f,
+            1.3946564197540283f,
+            0.9991465210914612f,
+            0.6240804195404053f,
+            0.37651097774505615f
+        };
         for (int step = 0; step < 10; step++) {
 
             timespec start, end;
-            getTicks(CLOCK_MONOTONIC, &start);
+            clock_gettime(CLOCK_MONOTONIC, &start);
 
             gpt2_forward(&model, x, y, B, T);
             gpt2_zero_grad(&model);
             gpt2_backward(&model);
 
-            getTicks(CLOCK_MONOTONIC, &end);
+            clock_gettime(CLOCK_MONOTONIC, &end);
+            double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
 
             if (step == 0) {
                 // error checking at step 0 for reference activations/gradients
@@ -116,7 +130,7 @@ unsafe class test_gpt2 {
                     if(i < 3) {
                         printf("%f %f\n", expected_logits[i], model.acts.logits[i]);
                     }
-                    if (Math.Abs(expected_logits[i] - model.acts.logits[i]) >= 1e-2) {
+                    if (fabsf(expected_logits[i] - model.acts.logits[i]) >= 1e-2) {
                         printf("MISMATCH AT INDEX %d: ", i);
                         printf("%f %f\n", expected_logits[i],model.acts.logits[i]);
                         logits_ok = 0;
@@ -129,11 +143,11 @@ unsafe class test_gpt2 {
                 allok = allok && logits_ok == 1;
 
                 // compare the achieved loss
-                if (Math.Abs(model.mean_loss - *expected_loss) >= 1e-2) {
-                    Console.Write("LOSS MISMATCH: {0} {1}\n", model.mean_loss, *expected_loss);
+                if (fabsf(model.mean_loss - *expected_loss) >= 1e-2) {
+                    printf("LOSS MISMATCH: %f %f\n", model.mean_loss, *expected_loss);
                     allok = false;
                 } else {
-                    Console.Write("LOSS OK: {0} {1}\n", model.mean_loss, *expected_loss);
+                    printf("LOSS OK: %f %f\n", model.mean_loss, *expected_loss);
                 }
 
                 // finally check all the gradients
@@ -162,35 +176,16 @@ unsafe class test_gpt2 {
 
             gpt2_update(&model, 1e-4f, 0.9f, 0.999f, 1e-8f, 0.01f, step+1);
 
+            // compare the losses
+            float expected_loss2 = expected_losses[step];
+            float actual_loss = model.mean_loss;
+            bool step_loss_ok = fabsf(expected_loss2 - actual_loss) < 1e-2;
+            allok = allok && step_loss_ok;
+
             // print the timing information at the end
-            double time_elapsed_ms = (end.secs - start.secs);
-            Console.Write("step {0}: loss {1} (took {2} ms)\n", step, model.mean_loss, time_elapsed_ms * 1000);
-            losses[step] = model.mean_loss;
+            printf("step %d: loss %f (took %f ms) OK = %d\n", step, model.mean_loss, time_elapsed_s * 1000, step_loss_ok);
         }
 
-        // expected losses are as follows, from Python
-        float[] expected_losses = new float[10] {
-            5.270007133483887f,
-            4.059706687927246f,
-            3.3751230239868164f,
-            2.8007826805114746f,
-            2.315382242202759f,
-            1.8490285873413086f,
-            1.3946564197540283f,
-            0.9991465210914612f,
-            0.6240804195404053f,
-            0.37651097774505615f
-        };
-
-        // compare
-        for (int i = 0; i < 10; i++) {
-            if (Math.Abs(losses[i] - expected_losses[i]) >= 1e-2) {
-                Console.Write("LOSS MISMATCH AT STEP {0}: {1} {2}\n", i, losses[i], expected_losses[i]);
-                allok = false;
-            } else {
-                Console.Write("loss ok at step {0}: {1} {2}\n", i, losses[i], expected_losses[i]);
-            }
-        }
         if (allok) {
             Console.BackgroundColor = ConsoleColor.Green;
         } else {
@@ -208,6 +203,9 @@ unsafe class test_gpt2 {
         free(expected_grads_memory);
         gpt2_free(&model);
 
+        Console.WriteLine();
+        printf("Press [Enter] to continue...");
+        Console.Out.Flush();
         Console.ReadKey();
     }
 #endif
