@@ -63,7 +63,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="dev\cuda\vectorAddHostAlloc.cs" />
+    <Compile Include="docs\vectorAddHostAlloc.cs" />
     <Compile Include="dev\cuda\matmul_forward.cs" />
     <Compile Include="include\atomic.cs" />
     <Compile Include="dev\cpu\Common.cs" />
@@ -71,7 +71,7 @@
     <Compile Include="include\math.cs" />
     <Compile Include="include\cuda.cs" />
     <Compile Include="GPT2.cs" />
-    <Compile Include="dev\cuda\vectorAddMemAlloc.cs" />
+    <Compile Include="docs\vectorAddMemAlloc.cs" />
     <Compile Include="include\nvrtc.cs" />
     <Compile Include="include\std.cs" />
     <Compile Include="include\time.cs" />
@@ -85,10 +85,10 @@
     <None Include="dev\cuda\matmul_forward.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Include="dev\cuda\vectorAdd_kernel64.cu">
+    <None Include="docs\vectorAdd_kernel64.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Include="dev\cuda\vectorAdd_kernel64.fatbin" />
+    <None Include="docs\vectorAdd_kernel64.fatbin" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="train_gpt2.py" />
