@@ -8,6 +8,17 @@ public static class cuda {
         }
     }
 
+    public static unsafe void cuPrintDeviceInfo(int dev) {
+        checkCudaErrors(cuDeviceGetAttribute(out int pi, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY, dev));
+        checkCudaErrors(cuDeviceGetAttribute(out int major, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev));
+        checkCudaErrors(cuDeviceGetAttribute(out int minor, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev));
+        byte* devName = (byte*)std.malloc(256 + 1);
+        checkCudaErrors(cuDeviceGetName(devName, 256, dev));
+        devName[256] = (byte)'\0';
+        std.printf("> GPU Device %s with SM %d.%d compute capability.\n", Marshal.PtrToStringAnsi((IntPtr)devName), major, minor);
+        std.free(devName);
+    }
+
     public const int MEMORY_ALIGNMENT = 4096;
 
     // Macro to aligned up to the memory

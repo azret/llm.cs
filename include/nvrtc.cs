@@ -20,10 +20,11 @@ public static class nvrtc {
 
             nvrtcCheck(nvrtcGetProgramLog(prog, log));
 
-            var msg = Encoding.UTF8.GetString(log);
-
-            if (!string.IsNullOrWhiteSpace(msg)) {
-                Console.WriteLine(msg);
+            if (log[0] != 0) {
+                var msg = Encoding.UTF8.GetString(log);
+                if (!string.IsNullOrWhiteSpace(msg)) {
+                    Console.WriteLine(msg);
+                }
             }
 
             nvrtcCheck(res);
@@ -98,7 +99,6 @@ public static class nvrtc {
 
     [DllImport(nvrtc64)]
     public static extern nvrtcResult nvrtcGetProgramLog(IntPtr prog, byte[] log);
-
 
     [DllImport(nvrtc64)]
     public static extern nvrtcResult nvrtcGetPTXSize(IntPtr prog, out IntPtr ptxSizeRet);

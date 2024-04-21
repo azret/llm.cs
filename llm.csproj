@@ -34,7 +34,7 @@
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;matmul_forward</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;simple_printf</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -63,6 +63,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="docs\simple_printf.cs" />
     <Compile Include="docs\vectorAddHostAlloc.cs" />
     <Compile Include="dev\cuda\matmul_forward.cs" />
     <Compile Include="include\atomic.cs" />
@@ -83,6 +84,9 @@
     <None Include="App.config" />
     <Compile Include="dev\cpu\MatMul.cs" />
     <None Include="dev\cuda\matmul_forward.cu">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Include="docs\simple_printf.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Include="docs\vectorAdd_kernel64.cu">

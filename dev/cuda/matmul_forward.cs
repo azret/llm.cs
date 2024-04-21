@@ -58,11 +58,6 @@ unsafe static class matmul_forward {
 
 #if matmul_forward
     static unsafe int Main() {
-
-        string fileName = ".\\dev\\cuda\\matmul_forward.cu";
-
-        byte[] ptx = compile(File.ReadAllText(fileName), "matmul_forward");
-
         checkCudaErrors(cuInit());
         checkCudaErrors(cuDeviceGet(out var dev, 0));
 
@@ -73,8 +68,15 @@ unsafe static class matmul_forward {
         byte* devName = (byte*)malloc(256 + 1);
         checkCudaErrors(cuDeviceGetName(devName, 256, dev));
         devName[256] = (byte)'\0';
-        printf("> GPU Device %s has SM %d.%d compute capability\n", Marshal.PtrToStringAnsi((IntPtr)devName), major, minor);
+        printf("> GPU Device %s with SM %d.%d compute capability.\n", Marshal.PtrToStringAnsi((IntPtr)devName), major, minor);
         free(devName);
+
+
+        string fileName = ".\\dev\\cuda\\matmul_forward.cu";
+
+        printf("> Compiling CUDA source file %s...\n", fileName);
+
+        byte[] ptx = compile(File.ReadAllText(fileName), "matmul_forward");
 
         checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
         checkCudaErrors(cuCtxSetCurrent(ctx));
