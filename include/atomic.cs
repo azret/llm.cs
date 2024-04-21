@@ -2,9 +2,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 
-using static std;
-using static Common;
-
+using static std; 
 public static unsafe class atomic {
 
     public static unsafe void atomicAdd(float* dest, float val) {

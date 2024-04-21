@@ -32,9 +32,9 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
+    <Optimize>true</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;matmul_forward</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;test_gpt2</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -65,10 +65,7 @@
   <ItemGroup>
     <Compile Include="docs\simple_printf.cs" />
     <Compile Include="docs\vectorAddHostAlloc.cs" />
-    <Compile Include="dev\cuda\matmul_forward.cs" />
     <Compile Include="include\atomic.cs" />
-    <Compile Include="dev\cpu\Common.cs" />
-    <Compile Include="dev\cpu\layernorm_backward.cs" />
     <Compile Include="include\math.cs" />
     <Compile Include="include\cuda.cs" />
     <Compile Include="GPT2.cs" />
@@ -82,10 +79,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <Compile Include="dev\cpu\MatMul.cs" />
-    <None Include="dev\cuda\matmul_forward.cu">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
     <None Include="docs\simple_printf.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
@@ -97,6 +90,8 @@
   <ItemGroup>
     <Content Include="train_gpt2.py" />
   </ItemGroup>
-  <ItemGroup />
+  <ItemGroup>
+    <Folder Include="dev\" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

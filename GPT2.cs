@@ -1,19 +1,19 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
-using static kernel32;
-using static math;
 using static std;
 
 public unsafe struct GPT2 {
     // ----------------------------------------------------------------------------
     // all the individual layers' forward and backward passes
     // B = batch_size, T = sequence_length, C = channels, V = vocab_size
+
     public static unsafe void encoder_forward(float* out_,
-               int* inp, float* wte, float* wpe,
-               int B, int T, int C) {
+                       int* inp, float* wte, float* wpe,
+                       int B, int T, int C) {
         // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
         // inp is (B,T) of integers, holding the token ids at each (b,t) position
         // wte is (V,C) of token embeddings, short for "weight token embeddings"
@@ -36,9 +36,9 @@ public unsafe struct GPT2 {
         }
     }
 
-    static unsafe void encoder_backward(float* dwte, float* dwpe,
-                  float* dout, int* inp,
-                  int B, int T, int C) {
+    public static unsafe void encoder_backward(float* dwte, float* dwpe,
+                          float* dout, int* inp,
+                          int B, int T, int C) {
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
                 float* dout_bt = dout + b * T * C + t * C;
@@ -53,34 +53,125 @@ public unsafe struct GPT2 {
             }
         }
     }
-     
-    public static unsafe void matmul_forward(float* _Out,
-                                             float* _In,
-                                             float* _Weight,
-                                             float* _Bias,
-                                             int B,
-                                             int T,
-                                             int C,
-                                             int OC) {
-        global::MatMul.matmul_forward_cpu_2(
-            _Out,
-            _In,
-            _Weight,
-            _Bias,
-            B,
-            T,
-            C,
-            OC);
+
+    public static unsafe void layernorm_forward(float* out_, float* mean, float* rstd,
+                           float* inp, float* weight, float* bias,
+                           int B, int T, int C) {
+        // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
+        // both inp and out are (B,T,C) of the activations
+        // mean and rstd are (B,T) buffers, to be used later in backward pass
+        // at each position (b,t) of the input, the C-dimensional vector
+        // of activations gets normalized, then scaled and shifted
+        float eps = 1e-5f;
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                // seek to the input position inp[b,t,:]
+                float* x = inp + b * T * C + t * C;
+                // calculate the mean
+                float m = 0.0f;
+                for (int i = 0; i < C; i++) {
+                    m += x[i];
+                }
+                m = m / C;
+                // calculate the variance (without any bias correction)
+                float v = 0.0f;
+                for (int i = 0; i < C; i++) {
+                    float xshift = x[i] - m;
+                    v += xshift * xshift;
+                }
+                v = v / C;
+                // calculate the rstd (reciprocal standard deviation)
+                float s = 1.0f / sqrtf(v + eps);
+                // seek to the output position in out[b,t,:]
+                float* out_bt = out_ +b * T * C + t * C;
+                for (int i = 0; i < C; i++) {
+                    float n = (s * (x[i] - m)); // normalize
+                    float o = n * weight[i] + bias[i]; // scale and shift
+                    out_bt[i] = o; // write
+                }
+                // cache the mean and rstd for the backward pass later
+                mean[b * T + t] = m;
+                rstd[b * T + t] = s;
+            }
+        }
     }
 
-    static unsafe void matmul_backward_cpu(float* dinp, float* dweight, float* dbias,
-                     float* dout, float* inp, float* weight,
-                     int B, int T, int C, int OC) {
+    public static unsafe void layernorm_backward(float* dinp, float* dweight, float* dbias,
+                            float* dout, float* inp, float* weight, float* mean, float* rstd,
+                            int B, int T, int C) {
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                float* dout_bt = dout + b * T * C + t * C;
+                float* inp_bt = inp + b * T * C + t * C;
+                float* dinp_bt = dinp + b * T * C + t * C;
+                float mean_bt = mean[b * T + t];
+                float rstd_bt = rstd[b * T + t];
+
+                // first: two reduce operations
+                float dnorm_mean = 0.0f;
+                float dnorm_norm_mean = 0.0f;
+                for (int i = 0; i < C; i++) {
+                    float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
+                    float dnorm_i = weight[i] * dout_bt[i];
+                    dnorm_mean += dnorm_i;
+                    dnorm_norm_mean += dnorm_i * norm_bti;
+                }
+                dnorm_mean = dnorm_mean / C;
+                dnorm_norm_mean = dnorm_norm_mean / C;
+
+                // now iterate again and accumulate all the gradients
+                for (int i = 0; i < C; i++) {
+                    float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
+                    float dnorm_i = weight[i] * dout_bt[i];
+                    // gradient contribution to bias
+                    dbias[i] += dout_bt[i];
+                    // gradient contribution to weight
+                    dweight[i] += norm_bti * dout_bt[i];
+                    // gradient contribution to input
+                    float dval = 0.0f;
+                    dval += dnorm_i; // term 1
+                    dval -= dnorm_mean; // term 2
+                    dval -= norm_bti * dnorm_norm_mean; // term 3
+                    dval *= rstd_bt; // final scale
+                    dinp_bt[i] += dval;
+                }
+            }
+        }
+    }
+
+    public static unsafe void matmul_forward(float* out_,
+                        float* inp, float* weight, float* bias,
+                        int B, int T, int C, int OC) {
+        // most of the running time is spent here and in matmul_backward
+        // OC is short for "output channels"
+        // inp is (B,T,C), weight is (OC, C), bias is (OC)
+        // out will be (B,T,OC)
+#pragma omp parallel for collapse(2)
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                float* out_bt = out_ +b * T * OC + t * OC;
+                float* inp_bt = inp + b * T * C + t * C;
+                for (int o = 0; o < OC; o++) {
+                    float val = (bias != null) ? bias[o] : 0.0f;
+                    float* wrow = weight + o * C;
+                    for (int i = 0; i < C; i++) {
+                        val += inp_bt[i] * wrow[i];
+                    }
+                    out_bt[o] = val;
+                }
+            }
+        }
+    }
+
+    public static unsafe void matmul_backward(float* dinp, float* dweight, float* dbias,
+                         float* dout, float* inp, float* weight,
+                         int B, int T, int C, int OC) {
         // most of the running time is spent here and in matmul_forward
         // this backward could be done in a single "round" of loops
         // but that doesn't afford an efficient parallelization strategy
 
         // backward into inp first, parallelize over B,T
+#pragma omp parallel for collapse(2)
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
                 float* dout_bt = dout + b * T * OC + t * OC;
@@ -94,8 +185,8 @@ public unsafe struct GPT2 {
                 }
             }
         }
-
         // backward into weight/bias, parallelize over output channels OC
+#pragma omp parallel for
         for (int o = 0; o < OC; o++) {
             for (int b = 0; b < B; b++) {
                 for (int t = 0; t < T; t++) {
@@ -112,40 +203,7 @@ public unsafe struct GPT2 {
         }
     }
 
-    static unsafe void matmul_backward(float* dinp, float* dweight, float* dbias,
-                     float* dout, float* inp, float* weight,
-                     int B, int T, int C, int OC) {
-        Parallel.For(0, B * T, (bt) => {
-            int b = bt / T;
-            int t = bt % T;
-            float* dout_bt = dout + b * T * OC + t * OC;
-            float* dinp_bt = dinp + b * T * C + t * C;
-            for (int o = 0; o < OC; o++) {
-                float* wrow = weight + o * C;
-                float d = dout_bt[o];
-                for (int i = 0; i < C; i++) {
-                    dinp_bt[i] += wrow[i] * d;
-                }
-            }
-        });
-
-        Parallel.For(0, OC, (o) => {
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    float* dout_bt = dout + b * T * OC + t * OC;
-                    float* inp_bt = inp + b * T * C + t * C;
-                    float* dwrow = dweight + o * C;
-                    float d = dout_bt[o];
-                    if (dbias != null) { dbias[o] += d; }
-                    for (int i = 0; i < C; i++) {
-                        dwrow[i] += inp_bt[i] * d;
-                    }
-                }
-            }
-        });
-    }
-
-    public static unsafe void attention_forward_cpu(float* out_, float* preatt, float* att,
+    public static unsafe void attention_forward(float* out_, float* preatt, float* att,
                            float* inp,
                            int B, int T, int C, int NH) {
         // input is (B, T, 3C) holding the query, key, value (Q, K, V) vectors
@@ -159,12 +217,13 @@ public unsafe struct GPT2 {
         int hs = C / NH; // head size
         float scale = 1.0f / sqrtf(hs);
 
+#pragma omp parallel for collapse(3)
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
                 for (int h = 0; h < NH; h++) {
                     float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-                    float* preatt_bth = preatt + b*NH*T*T + h*T*T + t*T;
-                    float* att_bth = att + b*NH*T*T + h*T*T + t*T;
+                    float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
+                    float* att_bth = att + b * NH * T * T + h * T * T + t * T;
 
                     // pass 1: calculate query dot key and maxval
                     float maxval = -10000.0f; // TODO something better
@@ -206,10 +265,10 @@ public unsafe struct GPT2 {
                     }
 
                     // pass 4: accumulate weighted values into the output of attention
-                    float* out_bth = out_ + b * T * C + t * C + h * hs;
+                    float* out_bth = out_ +b * T * C + t * C + h * hs;
                     for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
                     for (int t2 = 0; t2 <= t; t2++) {
-                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C*2; // +C*2 because it's value
+                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
                         float att_btht2 = att_bth[t2];
                         for (int i = 0; i < hs; i++) {
                             out_bth[i] += att_btht2 * value_t2[i];
@@ -220,77 +279,7 @@ public unsafe struct GPT2 {
         }
     }
 
-
-    public static unsafe void attention_forward(float* out_, float* preatt, float* att,
-                           float* inp,
-                           int B, int T, int C, int NH) {
-
-        int C3 = C * 3;
-        int hs = C / NH; // head size
-        float scale = (float)(1.0 / Math.Sqrt(hs));
-
-        Parallel.For(0, B*T, (bt) => {
-            int b = bt / T;
-            int t = bt % T;
-            for (int h = 0; h < NH; h++) {
-                float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-                float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
-                float* att_bth = att + b * NH * T * T + h * T * T + t * T;
-
-                // pass 1: calculate query dot key and maxval
-                float maxval = -10000.0f; // TODO something better
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-
-                    // (query_t) dot (key_t2)
-                    float val = 0.0f;
-                    for (int i = 0; i < hs; i++) {
-                        val += query_t[i] * key_t2[i];
-                    }
-                    val *= scale;
-                    if (val > maxval) {
-                        maxval = val;
-                    }
-
-                    preatt_bth[t2] = val;
-                }
-
-                // pass 2: calculate the exp and keep track of sum
-                // maxval is being calculated and subtracted only for numerical stability
-                float expsum = 0.0f;
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float expv = (float)Math.Exp(preatt_bth[t2] - maxval);
-                    expsum += expv;
-                    att_bth[t2] = expv;
-                }
-                float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
-
-                // pass 3: normalize to get the softmax
-                for (int t2 = 0; t2 < T; t2++) {
-                    if (t2 <= t) {
-                        att_bth[t2] *= expsum_inv;
-                    } else {
-                        // causal attention mask. not strictly necessary to set to zero here
-                        // only doing this explicitly for debugging and checking to PyTorch
-                        att_bth[t2] = 0.0f;
-                    }
-                }
-
-                // pass 4: accumulate weighted values into the output of attention
-                float* out_bth = out_ + b * T * C + t * C + h * hs;
-                for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
-                    float att_btht2 = att_bth[t2];
-                    for (int i = 0; i < hs; i++) {
-                        out_bth[i] += att_btht2 * value_t2[i];
-                    }
-                }
-            }
-        });
-    }
-
-    static unsafe void attention_backward_cpu(float* dinp, float* dpreatt, float* datt,
+    public static unsafe void attention_backward(float* dinp, float* dpreatt, float* datt,
                             float* dout, float* inp, float* att,
                             int B, int T, int C, int NH) {
         // inp/dinp are (B, T, 3C) Q,K,V
@@ -350,63 +339,110 @@ public unsafe struct GPT2 {
         }
     }
 
-    static unsafe void attention_backward(float* dinp, float* dpreatt, float* datt,
-                            float* dout, float* inp, float* att,
-                            int B, int T, int C, int NH) {
-        int C3 = C * 3;
-        int hs = C / NH; // head size
-        float scale = (float)(1.0 / Math.Sqrt(hs));
+    static float GELU_SCALING_FACTOR = sqrtf(2.0f / (float)Math.PI);
+    public static unsafe void gelu_forward(float* out_, float* inp, int N) {
+        // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
+        for (int i = 0; i < N; i++) {
+            float x = inp[i];
+            float cube = 0.044715f * x * x * x;
+            out_[i] = 0.5f * x * (1.0f + tanhf(GELU_SCALING_FACTOR * (x + cube)));
+        }
+    }
 
-        Parallel.For(0, B * T, (bt) => {
-            int b = bt / T;
-            int t = bt % T;
+    // we want to use -Ofast optimization, but sadly GeLU breaks, so disable this flag just for it (#168)
+#pragma float_control(precise, on, push) // On msvc /fp:fast is a lot faster, but the expf inside coshf breaks the model
+    // __attribute__((optimize("no-finite-math-only"))) // same for gcc -Ofast
+    public static unsafe void gelu_backward(float* dinp, float* inp, float* dout, int N) {
+        for (int i = 0; i < N; i++) {
+            float x = inp[i];
+            float cube = 0.044715f * x * x * x;
+            float tanh_arg = GELU_SCALING_FACTOR * (x + cube);
+            float tanh_out = tanhf(tanh_arg);
+            float coshf_out = coshf(tanh_arg);
+            float sech_out = 1.0f / (coshf_out * coshf_out);
+            float local_grad = 0.5f * (1.0f + tanh_out) + x * 0.5f * sech_out * GELU_SCALING_FACTOR * (1.0f + 3.0f * 0.044715f * x * x);
+            dinp[i] += local_grad * dout[i];
+        }
+    }
+#pragma float_control(pop)
 
-            for (int h = 0; h < NH; h++) {
-                float* att_bth = att + b * NH * T * T + h * T * T + t * T;
-                float* datt_bth = datt + b * NH * T * T + h * T * T + t * T;
-                float* dpreatt_bth = dpreatt + b * NH * T * T + h * T * T + t * T;
-                float* dquery_t = dinp + b * T * C3 + t * C3 + h * hs;
-                float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+    public static unsafe void residual_forward(float* out_, float* inp1, float* inp2, int N) {
+        for (int i = 0; i < N; i++) {
+            out_[i] = inp1[i] + inp2[i];
+        }
+    }
 
-                // backward pass 4, through the value accumulation
-                float* dout_bth = dout + b * T * C + t * C + h * hs;
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
-                    float* dvalue_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C * 2;
-                    for (int i = 0; i < hs; i++) {
-                        // in the forward pass this was:
-                        // out_bth[i] += att_bth[t2] * value_t2[i];
-                        // so now we have:
-                        datt_bth[t2] += value_t2[i] * dout_bth[i];
-                        dvalue_t2[i] += att_bth[t2] * dout_bth[i];
+    public static unsafe void residual_backward(float* dinp1, float* dinp2, float* dout, int N) {
+        for (int i = 0; i < N; i++) {
+            dinp1[i] += dout[i];
+            dinp2[i] += dout[i];
+        }
+    }
+
+    public static unsafe void softmax_forward(float* probs, float* logits, int B, int T, int V) {
+        // output: probs are (B,T,V) of the probabilities (sums to 1.0 in each b,t position)
+        // input: logits is (B,T,V) of the unnormalized log probabilities
+#pragma omp parallel for collapse(2)
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                // probs <- softmax(logits)
+                float* logits_bt = logits + b * T * V + t * V;
+                float* probs_bt = probs + b * T * V + t * V;
+
+                // maxval is only calculated and subtracted for numerical stability
+                float maxval = -10000.0f; // TODO something better
+                for (int i = 0; i < V; i++) {
+                    if (logits_bt[i] > maxval) {
+                        maxval = logits_bt[i];
                     }
                 }
-
-                // backward pass 2 & 3, the softmax
-                // note that softmax (like e.g. tanh) doesn't need the input (preatt) to backward
-                for (int t2 = 0; t2 <= t; t2++) {
-                    for (int t3 = 0; t3 <= t; t3++) {
-                        float indicator = t2 == t3 ? 1.0f : 0.0f;
-                        float local_derivative = att_bth[t2] * (indicator - att_bth[t3]);
-                        dpreatt_bth[t3] += local_derivative * datt_bth[t2];
-                    }
+                float sum = 0.0f;
+                for (int i = 0; i < V; i++) {
+                    probs_bt[i] = expf(logits_bt[i] - maxval);
+                    sum += probs_bt[i];
                 }
-
-                // backward pass 1, the query @ key matmul
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-                    float* dkey_t2 = dinp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
-                    for (int i = 0; i < hs; i++) {
-                        // in the forward pass this was:
-                        // preatt_bth[t2] += (query_t[i] * key_t2[i]) * scale;
-                        // so now we have:
-                        dquery_t[i] += key_t2[i] * dpreatt_bth[t2] * scale;
-                        dkey_t2[i] += query_t[i] * dpreatt_bth[t2] * scale;
-                    }
+                for (int i = 0; i < V; i++) {
+                    probs_bt[i] /= sum;
                 }
             }
-        });
+        }
     }
+
+    public static unsafe void crossentropy_forward(float* losses,
+                              float* probs, int* targets,
+                              int B, int T, int V) {
+        // output: losses is (B,T) of the individual losses at each position
+        // input: probs are (B,T,V) of the probabilities
+        // input: targets is (B,T) of integers giving the correct index in logits
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                // loss = -log(probs[target])
+                float* probs_bt = probs + b * T * V + t * V;
+                int ix = targets[b * T + t];
+                losses[b * T + t] = -logf(probs_bt[ix]);
+            }
+        }
+    }
+
+    public static unsafe void crossentropy_softmax_backward(float* dlogits,
+                               float* dlosses, float* probs, int* targets,
+                               int B, int T, int V) {
+        // backwards through both softmax and crossentropy
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                float* dlogits_bt = dlogits + b * T * V + t * V;
+                float* probs_bt = probs + b * T * V + t * V;
+                float dloss = dlosses[b * T + t];
+                int ix = targets[b * T + t];
+                for (int i = 0; i < V; i++) {
+                    float p = probs_bt[i];
+                    float indicator = i == ix ? 1.0f : 0.0f;
+                    dlogits_bt[i] += (p - indicator) * dloss;
+                }
+            }
+        }
+    }
+
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public unsafe struct ParameterTensors {
@@ -490,10 +526,8 @@ public unsafe struct GPT2 {
     public int batch_size; // the batch size (B) of current forward pass
     public int seq_len; // the sequence length (T) of current forward pass
     public int* inputs; // the input tokens for the current forward pass
-    public int* P_inputs;
     public int* targets; // the target tokens for the current forward pass
     public float mean_loss; // after a forward pass with targets, will be populated with the mean loss
-
 
     // allocate memory for the parameters and point the individual tensors to the right places
     public static unsafe float* malloc_and_point_parameters(ParameterTensors* params_, int* param_sizes) {
@@ -600,37 +634,11 @@ public unsafe struct GPT2 {
             model->v_memory = null;
             model->grads_acts_memory = null;
             model->inputs = null;
-            model->P_inputs = null;
             model->targets = null;
             model->batch_size = 0;
             model->seq_len = 0;
             model->mean_loss = -1.0f; // -1.0f will designate no loss
         }
-    }
-
-    public static unsafe void gpt2_free(GPT2* model) {
-        free(model->params_memory);
-        free(model->grads_memory);
-        free(model->m_memory);
-        free(model->v_memory);
-        free(model->acts_memory);
-        free(model->grads_acts_memory);
-        free(model->P_inputs);
-        free(model->targets);
-        model->params_memory = null;
-        model->grads_memory = null;
-        model->m_memory = null;
-        model->v_memory = null;
-        model->acts_memory = null;
-        model->grads_acts_memory = null;
-        model->inputs = null;
-        model->P_inputs = null;
-        model->targets = null;
-    }
-
-    public static void gpt2_zero_grad(GPT2* model) {
-        if (model->grads_memory != null) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
-        if (model->grads_acts_memory != null) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
     }
 
     public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -646,6 +654,14 @@ public unsafe struct GPT2 {
         int L = model->config.num_layers;
         int NH = model->config.num_heads;
         int C = model->config.channels;
+
+        // validate inputs, all indices must be in the range [0, V)
+        for (int i = 0; i < B * T; i++) {
+            Debug.Assert(0 <= inputs[i] && inputs[i] < V);
+            if (targets != null) {
+                Debug.Assert(0 <= targets[i] && targets[i] < V);
+            }
+        }
 
         // allocate space for all the activations if needed (done here, lazily)
         if (model->acts_memory == null) {
@@ -680,28 +696,18 @@ public unsafe struct GPT2 {
             for (int i = 0; i < ActivationTensors.NUM_ACTIVATION_TENSORS; i++) {
                 num_activations += model->act_sizes[i];
             }
-            Console.Write("num_activations: {0}\n", num_activations);
+            printf("num_activations: %zu\n", num_activations);
             model->num_activations = num_activations;
             model->acts_memory = malloc_and_point_activations(&model->acts, model->act_sizes);
-
-            // create memory for caching inputs and targets
-
-            model->P_inputs = (int*)malloc(B * T * sizeof(int) + cuda.MEMORY_ALIGNMENT);
-            model->inputs = (int*)cuda.MEMORY_ALIGN_UP(model->P_inputs, cuda.MEMORY_ALIGNMENT);
-
-            model->targets = (int*)malloc(B * T * sizeof(int) + cuda.MEMORY_ALIGNMENT);
-
-            cuda.CHECK_ALIGNMENT(model->inputs);
-
+            // also create memory for caching inputs and targets
+            model->inputs = (int*)malloc(B * T * sizeof(int));
+            model->targets = (int*)malloc(B * T * sizeof(int)); // might be unused if we never have targets but it's small
         } else {
             // validate B,T is consistent with how we've allocated the memory before
             // in principle we could get more clever here in the future, for now this is safest
             if (B != model->batch_size || T != model->seq_len) {
-                Console.Write("Error: batch size or sequence length is inadequately large\n");
-                Console.Write("Model: B={0} T={1}, Desired: B={2} T={3}\n", model->batch_size, model->seq_len, B, T);
-                throw new Exception("Batch size or sequence length is inadequately large.");
+                throw new Exception(string.Format("Model: B={0} T={1}, Desired: B={2} T={3}", model->batch_size, model->seq_len, B, T));
             }
-
         }
 
         // cache the inputs/targets
@@ -714,7 +720,7 @@ public unsafe struct GPT2 {
         ParameterTensors params_ = model->params_; // for brevity
         ActivationTensors acts = model->acts;
         float* residual;
-        encoder_forward(acts.encoded, model->inputs, params_.wte, params_.wpe, B, T, C); // encoding goes into residual[0]
+        encoder_forward(acts.encoded, inputs, params_.wte, params_.wpe, B, T, C); // encoding goes into residual[0]
         for (int l = 0; l < L; l++) {
 
             residual = l == 0 ? acts.encoded : acts.residual3 + (l - 1) * B * T * C;
@@ -752,19 +758,19 @@ public unsafe struct GPT2 {
             float* l_residual3 = acts.residual3 + l * B * T * C;
 
             // now do the forward pass
-            layernorm_backward.layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+            layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
             matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3 * C);
             attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
             matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
             residual_forward(l_residual2, residual, l_attproj, B * T * C);
-            layernorm_backward.layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+            layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
             matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4 * C);
             gelu_forward(l_fch_gelu, l_fch, B * T * 4 * C);
             matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4 * C, C);
             residual_forward(l_residual3, l_residual2, l_fcproj, B * T * C);
         }
         residual = acts.residual3 + (L - 1) * B * T * C; // last residual is in residual3
-        layernorm_backward.layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
+        layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
         matmul_forward(acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
         softmax_forward(acts.probs, acts.logits, B, T, V);
 
@@ -782,72 +788,16 @@ public unsafe struct GPT2 {
         }
     }
 
-    static float GELU_SCALING_FACTOR = (float)Math.Sqrt(2.0 / Math.PI);
-    public static unsafe void gelu_forward(float* out_, float* inp, int N) {
-        // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
-        for (int i = 0; i < N; i++) {
-            float x = inp[i];
-            float cube = 0.044715f * x * x * x;
-            out_[i] = 0.5f * x * (1.0f + (float)Math.Tanh(GELU_SCALING_FACTOR * (x + cube)));
-        }
-    }
-
-    public static unsafe void residual_forward(float* out_, float* inp1, float* inp2, int N) {
-        for (int i = 0; i < N; i++) {
-            out_[i] = inp1[i] + inp2[i];
-        }
-    }
-
-    public static unsafe void softmax_forward(float* probs, float* logits, int B, int T, int V) {
-        // output: probs are (B,T,V) of the probabilities (sums to 1.0 in each b,t position)
-        // input: logits is (B,T,V) of the unnormalized log probabilities
-        Parallel.For(0, B * T, (bt) => {
-            int b = bt / T;
-            int t = bt % T;
-
-            // probs <- softmax(logits)
-            float* logits_bt = logits + b * T * V + t * V;
-            float* probs_bt = probs + b * T * V + t * V;
-
-            // maxval is only calculated and subtracted for numerical stability
-            float maxval = -10000.0f; // TODO something better
-            for (int i = 0; i < V; i++) {
-                if (logits_bt[i] > maxval) {
-                    maxval = logits_bt[i];
-                }
-            }
-            float sum = 0.0f;
-            for (int i = 0; i < V; i++) {
-                probs_bt[i] = (float)Math.Exp(logits_bt[i] - maxval);
-                sum += probs_bt[i];
-            }
-            for (int i = 0; i < V; i++) {
-                probs_bt[i] /= sum;
-            }
-        });
-    }
-
-    public static unsafe void crossentropy_forward(float* losses,
-                              float* probs, int* targets,
-                              int B, int T, int V) {
-        // output: losses is (B,T) of the individual losses at each position
-        // input: probs are (B,T,V) of the probabilities
-        // input: targets is (B,T) of integers giving the correct index in logits
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                // loss = -log(probs[target])
-                float* probs_bt = probs + b * T * V + t * V;
-                int ix = targets[b * T + t];
-                losses[b * T + t] = -(float)Math.Log(probs_bt[ix]);
-            }
-        }
+    public static unsafe void gpt2_zero_grad(GPT2* model) {
+        if (model->grads_memory != null) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
+        if (model->grads_acts_memory != null) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
     }
 
     public static unsafe void gpt2_backward(GPT2* model) {
 
         // double check we forwarded previously, with targets
         if (model->mean_loss == -1.0f) {
-            throw new Exception("Error: must forward with targets before backward\n");
+            throw new Exception("Error: must forward with targets before backward");
         }
 
         // lazily allocate the memory for gradients of the weights and activations, if needed
@@ -881,17 +831,7 @@ public unsafe struct GPT2 {
         matmul_backward(grads_acts.lnf, grads.wte, null, grads_acts.logits, acts.lnf, params_.wte, B, T, C, V);
         float* residual = acts.residual3 + (L - 1) * B * T * C; // last layer's residual
         float* dresidual = grads_acts.residual3 + (L - 1) * B * T * C; // write to last layer's residual
-        layernorm_backward.layernorm_backward_0(dresidual,
-                                     grads.lnfw,
-                                     grads.lnfb,
-                                     grads_acts.lnf,
-                                     residual,
-                                     params_.lnfw,
-                                     acts.lnf_mean,
-                                     acts.lnf_rstd,
-                                     B,
-                                     T,
-                                     C);
+        layernorm_backward(dresidual, grads.lnfw, grads.lnfb, grads_acts.lnf, residual, params_.lnfw, acts.lnf_mean, acts.lnf_rstd, B, T, C);
 
         for (int l = L - 1; l >= 0; l--) {
 
@@ -950,64 +890,23 @@ public unsafe struct GPT2 {
             matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, B, T, 4 * C, C);
             gelu_backward(dl_fch, l_fch, dl_fch_gelu, B * T * 4 * C);
             matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, B, T, C, 4 * C);
-            layernorm_backward.layernorm_backward_0(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
+            layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
             residual_backward(dresidual, dl_attproj, dl_residual2, B * T * C);
             matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, B, T, C, C);
             attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, B, T, C, NH);
             matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, B, T, C, 3 * C);
-            layernorm_backward.layernorm_backward_0(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
+            layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
         }
         encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, model->inputs, B, T, C);
     }
 
-    static unsafe void crossentropy_softmax_backward(float* dlogits,
-                           float* dlosses, float* probs, int* targets,
-                           int B, int T, int V) {
-        // backwards through both softmax and crossentropy
-        for (int b = 0; b < B; b++) {
-            for (int t = 0; t < T; t++) {
-                float* dlogits_bt = dlogits + b * T * V + t * V;
-                float* probs_bt = probs + b * T * V + t * V;
-                float dloss = dlosses[b * T + t];
-                int ix = targets[b * T + t];
-                for (int i = 0; i < V; i++) {
-                    float p = probs_bt[i];
-                    float indicator = i == ix ? 1.0f : 0.0f;
-                    dlogits_bt[i] += (p - indicator) * dloss;
-                }
-            }
-        }
-    }
-
-    static unsafe void residual_backward(float* dinp1, float* dinp2, float* dout, int N) {
-        for (int i = 0; i < N; i++) {
-            dinp1[i] += dout[i];
-            dinp2[i] += dout[i];
-        }
-    }
-
-    static unsafe void gelu_backward(float* dinp, float* inp, float* dout, int N) {
-        for (int i = 0; i < N; i++) {
-            float x = inp[i];
-            float cube = 0.044715f * x * x * x;
-            float tanh_arg = ((float)GELU_SCALING_FACTOR * (x + cube));
-            float tanh_out = (float)Math.Tanh(tanh_arg);
-            float coshf_out = (float)Math.Cosh(tanh_arg);
-            float sech_out = 1.0f / (coshf_out * coshf_out);
-            float local_grad = 0.5f * (1.0f + tanh_out) + x * 0.5f * sech_out * (float)GELU_SCALING_FACTOR * (1.0f + 3.0f * 0.044715f * x * x);
-            dinp[i] += local_grad * dout[i];
-        }
-    }
-
-    public static unsafe void gpt2_update(GPT2* model, float learning_rate, float beta1, 
-        float beta2, float eps, float weight_decay, int t) {
-
+    public static unsafe void gpt2_update(GPT2* model, float learning_rate, float beta1, float beta2, float eps, float weight_decay, int t) {
         // reference: https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html
 
         // lazily allocate the memory for m_memory and v_memory
         if (model->m_memory == null) {
-            model->m_memory = (float*)Marshal.AllocHGlobal(model->num_parameters * sizeof(float));
-            model->v_memory = (float*)Marshal.AllocHGlobal(model->num_parameters * sizeof(float));
+            model->m_memory = (float*)malloc(model->num_parameters * sizeof(float));
+            model->v_memory = (float*)malloc(model->num_parameters * sizeof(float));
         }
 
         for (int i = 0; i < model->num_parameters; i++) {
@@ -1019,13 +918,24 @@ public unsafe struct GPT2 {
             // update the second moment (RMSprop)
             float v = beta2 * model->v_memory[i] + (1.0f - beta2) * grad * grad;
             // bias-correct both moments
-            float m_hat = (float)(m / (1.0 - (float)Math.Pow(beta1, t)));
-            float v_hat = (float)(v / (1.0 - (float)Math.Pow(beta2, t)));
+            float m_hat = m / (1.0f - powf(beta1, t));
+            float v_hat = v / (1.0f - powf(beta2, t));
 
             // update
             model->m_memory[i] = m;
             model->v_memory[i] = v;
-            model->params_memory[i] -= learning_rate * (m_hat / ((float)Math.Sqrt(v_hat) + eps) + weight_decay * param);
+            model->params_memory[i] -= learning_rate * (m_hat / (sqrtf(v_hat) + eps) + weight_decay * param);
         }
+    }
+
+    public static unsafe void gpt2_free(GPT2* model) {
+        free(model->params_memory);
+        free(model->grads_memory);
+        free(model->m_memory);
+        free(model->v_memory);
+        free(model->acts_memory);
+        free(model->grads_acts_memory);
+        free(model->inputs);
+        free(model->targets);
     }
 }

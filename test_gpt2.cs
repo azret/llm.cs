@@ -8,42 +8,46 @@ using static time;
 using static std;
 
 unsafe class test_gpt2 {
+    // poor man's tensor checker
     static bool check_tensor(float* a, float* b, int n, string label) {
-        int print_upto = 5;
-        int printed = 0;
+        int print_upto = 3;
         bool ok = true;
-        Console.Write("{0}\n", label);
+        float maxdiff = 0.0f;
+        float tol = 2e-2f;
+        printf("%s\n", label);
         for (int i = 0; i < n; i++) {
-            if (Math.Abs(a[i] - b[i]) <= 1e-2) {
-                if (printed < print_upto && false /* DON'T PRINT POSITIVES */) {
-                    Console.Write("OK ");
-                    Console.Write("{0} {1}\n", a[i], b[i]);
-                    printed++;
+            // look at the diffence at position i of these two tensors
+            float diff = fabsf(a[i] - b[i]);
+
+            // keep track of the overall error
+            ok = ok && (diff <= tol);
+            if (diff > maxdiff) { maxdiff = diff; }
+
+            // for the first few elements of each tensor, pretty print
+            // the actual numbers, so we can do a visual, qualitative proof/assessment
+            if (i < print_upto) {
+                if (diff <= tol) {
+                    if (i < print_upto) { Console.BackgroundColor = ConsoleColor.Green; printf("OK"); }
+                } else {
+                    if (i < print_upto) { Console.BackgroundColor = ConsoleColor.Red; printf("NOT OK"); }
                 }
-            } else {
-                if (printed < print_upto) {
-                    Console.BackgroundColor = ConsoleColor.Red;
-                    Console.Write("NOT OK ");
-                    Console.ResetColor();
-                    Console.ForegroundColor = ConsoleColor.DarkYellow;
-                    Console.Write("{0} {1}", a[i], b[i]);
-                    Console.ResetColor();
-                    Console.Write("\n");
-                    printed++;
-                }
-                ok = false;
+                Console.ResetColor();
+                printf(" [%f %f]\n", a[i], b[i]);
             }
         }
-        // print the final result
+        // print the final result for this tensor
         if (ok) {
             Console.BackgroundColor = ConsoleColor.Green;
-            Console.Write("TENSOR OK");
+            printf("TENSOR OK");
+            Console.ResetColor();
+            printf(", maxdiff = %e\n", maxdiff);
         } else {
             Console.BackgroundColor = ConsoleColor.Red;
-            Console.Write("TENSOR NOT OK");
+            printf("TENSOR NOT OK");
+            Console.ResetColor();
+            printf(", maxdiff = %e\n", maxdiff);
         }
         Console.ResetColor();
-        Console.Write('\n');
         return ok;
     }
 

@@ -11,6 +11,9 @@ internal static class std {
     public static float powf(float x, float y) => (float)Math.Pow(x, y);
     public static float logf(float x) => (float)Math.Log(x);
     public static float expf(float x) => (float)Math.Exp(x);
+    public static float tanhf(float x) => (float)Math.Tanh(x);
+    public static float coshf(float x) => (float)Math.Cosh(x);
+    public static float fabsf(float x) => (float)Math.Abs(x);
 
     public static unsafe ulong xorshift(ulong* state) {
         /* See href="https://en.wikipedia.org/wiki/Xorshift#xorshift.2A" */
@@ -123,6 +126,12 @@ internal static class std {
                         s += "{" + i.ToString() + ":F6}";
                     }
                     break;
+                case 'z':
+                    s += "{" + i.ToString() + "}";
+                    if (fmt[pos + 2] == 'u') {
+                        skip++;
+                    }
+                    break;
                 case 'd':
                 case 's':
                 case 'g':
@@ -135,9 +144,6 @@ internal static class std {
             s += fmt.Substring(
                 pos + skip);
             fmt = s;
-            if (args[i].GetType() == typeof(float)) {
-                Console.WriteLine("{0:f3}", (double)(float)args[i]);
-            }
         }
         Console.Write(fmt, args);
     }
