@@ -1,16 +1,11 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 
 using static cuda;
 using static nvrtc;
 using static std;
 
 unsafe static class simple_printf {
-
-    static uint ceil_div(uint dividend, uint divisor) {
-        return (dividend + divisor - 1) / divisor;
-    }
 
 #if simple_printf
     static unsafe int Main() {
@@ -30,12 +25,6 @@ unsafe static class simple_printf {
 
         checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
 
-        // Kernel configuration, where a two-dimensional grid and
-        // three-dimensional blocks are configured.
-        // dim3 dimGrid(2, 2);
-        // dim3 dimBlock(2, 2, 2);
-        // testKernel <<< 2, 3 >>> (10);
-
         IntPtr simple_printf_2;
 
         checkCudaErrors(cuModuleGetFunction(
@@ -45,7 +34,7 @@ unsafe static class simple_printf {
 
         Console.WriteLine();
 
-        uint threadsPerBlock = 11;
+        uint threadsPerBlock = 16;
 
         int B = 3;
         int T = 3;
@@ -57,8 +46,8 @@ unsafe static class simple_printf {
 
         checkCudaErrors(cuLaunchKernel(
             simple_printf_2,
-            x, y, z,
-            threadsPerBlock, 1, 1,
+            1, 1, 1,
+            threadsPerBlock, threadsPerBlock, 1,
             0,
             IntPtr.Zero,
             null,

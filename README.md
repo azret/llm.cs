@@ -1,19 +1,30 @@
-# llm.cs
+# LLM.C#
 
-This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CUDA](https://github.com/karpathy/llm.c)
+This is a **C#** port of [LLM training in simple, raw C/CUDA](https://github.com/karpathy/llm.c) by @[karpathy](https://github.com/karpathy) 
 
-## status
+## Current Status
 
-- CPU ✅
-    - all forward layers ✅
-    - all backward layers ✅
-      
-- CUDA 🚧
-    - matmul_forward ✅
-      
-## notes
+- CPU: Completed ✅ 
+- CUDA: Under Development 🚧
+ 
+## Branches
 
-The C#/CPU port is numerically identical to the C/CPU version. Current best run on a CPU is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized. ✌️
+1. [master](https://github.com/azret/llm.cs/tree/master)
+
+     Active work to port CUDA kernels using CUDA Driver API without any external dependencies.
+
+2. [reference](https://github.com/azret/llm.cs/tree/reference)
+
+     Initial clean reference port.
+
+## Quick Start
+
+See [llm.c](https://github.com/karpathy/llm.c)
+
+
+## Notes
+
+The C#/CPU port is numerically identical to the C/CPU version. Current best run on a CPU is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized.
 
 ```c
 [GPT-2]
@@ -90,17 +101,3 @@ loss ok at step 9: 0.3783574 0.376511
 // See comment above...
 overall okay: False
 ```
-
-## branches
-
-1. Active work to port CUDA kernels using CUDA Driver API without any external dependencies.
-
-    https://github.com/azret/llm.cs/tree/master
-
-2. Initial C/CPU to C#/CPU reference Port.
-
-    https://github.com/azret/llm.cs/tree/reference
-
-## quick start
-
-See [https://github.com/karpathy/llm.c]

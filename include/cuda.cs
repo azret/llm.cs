@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 public static class cuda {
@@ -248,6 +249,7 @@ public static class cuda {
 
     [DllImport("nvcuda")]
     public static extern unsafe CUresult cuMemcpyDtoH_v2(void* dstHost, IntPtr srcDevice, ulong ByteCount);
+ 
 
     /**
      * If set, host memory is portable between CUDA contexts.
@@ -304,6 +306,9 @@ public static class cuda {
     public static extern CUresult cuModuleLoadData(out IntPtr module, byte[] image);
 
     [DllImport("nvcuda")]
+    public static extern CUresult cuModuleUnload(IntPtr module);
+
+    [DllImport("nvcuda")]
     public static extern CUresult cuModuleGetFunction(out IntPtr hfunc, IntPtr hmod, [MarshalAs(UnmanagedType.LPStr)] string name);
 
     [DllImport("nvcuda")]
@@ -313,8 +318,6 @@ public static class cuda {
     public static extern unsafe CUresult cuLaunchKernel(
         IntPtr f, uint gridDimX, uint gridDimY, uint gridDimZ, uint blockDimX, uint blockDimY, uint blockDimZ,
         uint sharedMemBytes, IntPtr hStream, void*[] kernelParams, void*[] extra);
-
-
 
     /**
      * Error codes

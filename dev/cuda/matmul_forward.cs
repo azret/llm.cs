@@ -1,33 +1,12 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 
 using static cuda;
 using static nvrtc;
 using static std;
 
 unsafe static class matmul_forward {
-    static void matmul_forward_cpu_kernel(int b,
-                                      int t,
-                                      float* _Out,
-                                      float* _In,
-                                      float* _Weight,
-                                      float* _Bias,
-                                      int T,
-                                      int C,
-                                      int OC) {
-        float* x = _In + b * T * C + t * C;
-        float* y = _Out + b * T * OC + t * OC;
-        for (int o = 0; o < OC; o++) {
-            float* w = _Weight + o * C;
-            float val = (_Bias != null) ? _Bias[o] : 0.0f;
-            for (int i = 0; i < C; i++) {
-                val += x[i] * w[i];
-            }
-            y[o] = val;
-        }
-    }
-
+    // Reference implementation
     public static void matmul_forward_cpu(float* _Out,
                                        float* _In,
                                        float* _Weight,
@@ -38,16 +17,16 @@ unsafe static class matmul_forward {
                                        int OC) {
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
-                matmul_forward_cpu_kernel(
-                    b,
-                    t,
-                    _Out,
-                    _In,
-                    _Weight,
-                    _Bias,
-                    T,
-                    C,
-                    OC);
+                for (int o = 0; o < OC; o++) {
+                    float* x = _In + b * T * C + t * C;
+                    float* y = _Out + b * T * OC + t * OC;
+                    float* w = _Weight + o * C;
+                    float sum = (_Bias != null) ? _Bias[o] : 0.0f;
+                    for (int i = 0; i < C; i++) {
+                        sum += x[i] * w[i];
+                    }
+                    y[o] = sum;
+                }
             }
         }
     }
@@ -61,16 +40,7 @@ unsafe static class matmul_forward {
         checkCudaErrors(cuInit());
         checkCudaErrors(cuDeviceGet(out var dev, 0));
 
-        checkCudaErrors(cuDeviceGetAttribute(out int pi, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY, dev));
-        checkCudaErrors(cuDeviceGetAttribute(out int major, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev));
-        checkCudaErrors(cuDeviceGetAttribute(out int minor, CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev));
-
-        byte* devName = (byte*)malloc(256 + 1);
-        checkCudaErrors(cuDeviceGetName(devName, 256, dev));
-        devName[256] = (byte)'\0';
-        printf("> GPU Device %s with SM %d.%d compute capability.\n", Marshal.PtrToStringAnsi((IntPtr)devName), major, minor);
-        free(devName);
-
+        cuPrintDeviceInfo(dev);
 
         string fileName = ".\\dev\\cuda\\matmul_forward.cu";
 
@@ -82,6 +52,8 @@ unsafe static class matmul_forward {
         checkCudaErrors(cuCtxSetCurrent(ctx));
 
         checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
+
+        Console.WriteLine();
 
         ulong seed = 37;
 
@@ -153,9 +125,10 @@ unsafe static class matmul_forward {
 
         checkCudaErrors(cuCtxDestroy_v2(ctx));
 
+        Console.WriteLine();
         if (ok) {
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"OK.");
+            Console.WriteLine($"OK");
             Console.ResetColor();
         } else {
             Console.ForegroundColor = ConsoleColor.Red;
@@ -163,7 +136,11 @@ unsafe static class matmul_forward {
             Console.ResetColor();
         }
 
+        Console.WriteLine();
+        printf("Press [Enter] to continue...");
+        Console.Out.Flush();
         Console.ReadKey();
+
         return 0;
     }
 
