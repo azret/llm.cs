@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Reflection;
 using System.Runtime.InteropServices;
 
 public static class cuda {
@@ -32,6 +31,11 @@ public static class cuda {
             throw new Exception();
         }
     }
+
+    public static uint CEIL_DIV(uint dividend, uint divisor) {
+        return (dividend + divisor - 1) / divisor;
+    }
+
 
     [DllImport("nvcuda")]
     public static extern CUresult cuDriverGetVersion(out int driverVersion);

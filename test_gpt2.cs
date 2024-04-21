@@ -6,8 +6,13 @@ using static math;
 using static time;
 using static std;
 
+#if test_gpt2_cuda
+using static train_gpt2_cuda;
+using static train_gpt2_cuda.GPT2;
+#else 
 using static train_gpt2;
 using static train_gpt2.GPT2;
+#endif
 
 unsafe class test_gpt2 {
     // poor man's tensor checker
@@ -53,7 +58,7 @@ unsafe class test_gpt2 {
         return ok;
     }
 
-#if test_gpt2
+#if test_gpt2 || test_gpt2_cuda
     static unsafe void Main(string[] args) {
         // build the GPT-2 model from a checkpoint
         GPT2 model;

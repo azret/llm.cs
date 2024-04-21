@@ -30,10 +30,6 @@ unsafe static class matmul_forward {
         }
     }
 
-    static uint ceil_div(uint dividend, uint divisor) {
-        return (dividend + divisor - 1) / divisor;
-    }
-
 #if matmul_forward
     static unsafe int Main() {
         bool useHostAlloc = true;

@@ -32,9 +32,9 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
+    <Optimize>true</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;matmul_forward</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;test_gpt2_cuda</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -68,6 +68,7 @@
     <Compile Include="include\nvrtc.cs" />
     <Compile Include="include\std.cs" />
     <Compile Include="include\time.cs" />
+    <Compile Include="dev\train_gpt2_cuda.cs" />
     <Compile Include="train_gpt2.cs" />
     <Compile Include="test_gpt2.cs" />
     <Compile Include="include\kernel32.cs" />

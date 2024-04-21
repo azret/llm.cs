@@ -7,10 +7,25 @@ using Microsoft.Win32.SafeHandles;
 
 using static std;
 using static time;
+using static cuda;
+using static nvrtc;
 
-unsafe static class train_gpt2 {
+unsafe static class train_gpt2_cuda {
+    static unsafe void* cudaHostMalloc(int size) {
+        void* p_d_Out;
+        checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_Out, (ulong)size));
+        return p_d_Out;
+    }
+
+    static unsafe void cudaHostFree(void* p) {
+        if (p != null) {
+            checkCudaErrors(cuMemFreeHost(p));
+        }
+    }
 
     public unsafe struct GPT2 {
+        public IntPtr matmul_forward_kernel;
+
         // ----------------------------------------------------------------------------
         // all the individual layers' forward and backward passes
         // B = batch_size, T = sequence_length, C = channels, V = vocab_size
@@ -143,28 +158,60 @@ unsafe static class train_gpt2 {
             }
         }
 
-        public static unsafe void matmul_forward(float* out_,
+        public static unsafe void matmul_forward(GPT2* model, float* out_,
                             float* inp, float* weight, float* bias,
                             int B, int T, int C, int OC) {
-            // most of the running time is spent here and in matmul_backward
-            // OC is short for "output channels"
-            // inp is (B,T,C), weight is (OC, C), bias is (OC)
-            // out will be (B,T,OC)
-            Parallel.For(0, B * T, (bt) => {
-                int b = bt / T;
-                int t = bt % T;
+            if (model->matmul_forward_kernel != IntPtr.Zero) {
+                uint sqrt_block_size = 16;
 
-                float* out_bt = out_ + b * T * OC + t * OC;
-                float* inp_bt = inp + b * T * C + t * C;
-                for (int o = 0; o < OC; o++) {
-                    float val = (bias != null) ? bias[o] : 0.0f;
-                    float* wrow = weight + o * C;
-                    for (int i = 0; i < C; i++) {
-                        val += inp_bt[i] * wrow[i];
-                    }
-                    out_bt[o] = val;
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Weight, (void*)weight, 0));
+
+                IntPtr d_Bias = IntPtr.Zero;
+                if (bias != null) {
+                    checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_Bias, (void*)bias, 0));
                 }
-            });
+
+                int d_BT = B * T;
+                int d_T = T;
+                int d_C = C;
+                int d_OC = OC;
+
+                void*[] args = { &d_Out, &d_In, &d_Weight, &d_Bias, &d_BT, &d_C, &d_OC };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->matmul_forward_kernel,
+                    CEIL_DIV((uint)B * (uint)T, sqrt_block_size), CEIL_DIV((uint)OC, sqrt_block_size), 1,
+                    sqrt_block_size, sqrt_block_size, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                checkCudaErrors(cuCtxSynchronize());
+
+            } else {
+                // most of the running time is spent here and in matmul_backward
+                // OC is short for "output channels"
+                // inp is (B,T,C), weight is (OC, C), bias is (OC)
+                // out will be (B,T,OC)
+                Parallel.For(0, B * T, (bt) => {
+                    int b = bt / T;
+                    int t = bt % T;
+
+                    float* out_bt = out_ + b * T * OC + t * OC;
+                    float* inp_bt = inp + b * T * C + t * C;
+                    for (int o = 0; o < OC; o++) {
+                        float val = (bias != null) ? bias[o] : 0.0f;
+                        float* wrow = weight + o * C;
+                        for (int i = 0; i < C; i++) {
+                            val += inp_bt[i] * wrow[i];
+                        }
+                        out_bt[o] = val;
+                    }
+                });
+            }
         }
 
         public static unsafe void matmul_backward(float* dinp, float* dweight, float* dbias,
@@ -535,7 +582,7 @@ unsafe static class train_gpt2 {
                 num_parameters += param_sizes[i];
             }
             // malloc all parameters all at once
-            float* params_memory = (float*)malloc(num_parameters * sizeof(float));
+            float* params_memory = (float*)cudaHostMalloc(num_parameters * sizeof(float));
             // assign all the tensors
             float**[] ptrs = {
             &params_->wte, &params_->wpe, &params_->ln1w, &params_->ln1b, &params_->qkvw, &params_->qkvb,
@@ -556,7 +603,7 @@ unsafe static class train_gpt2 {
             for (int i = 0; i < ActivationTensors.NUM_ACTIVATION_TENSORS; i++) {
                 num_activations += act_sizes[i];
             }
-            float* acts_memory = (float*)malloc(num_activations * sizeof(float));
+            float* acts_memory = (float*)cudaHostMalloc(num_activations * sizeof(float));
             float**[] ptrs = {
             &acts->encoded, &acts->ln1, &acts->ln1_mean, &acts->ln1_rstd, &acts->qkv, &acts->atty,
             &acts->preatt, &acts->att, &acts->attproj, &acts->residual2, &acts->ln2, &acts->ln2_mean,
@@ -572,6 +619,29 @@ unsafe static class train_gpt2 {
         }
 
         public static unsafe void gpt2_build_from_checkpoint(GPT2* model, string checkpoint_path) {
+            checkCudaErrors(cuInit());
+            checkCudaErrors(cuDeviceGet(out var dev, 0));
+
+            cuPrintDeviceInfo(dev);
+
+            printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
+
+            byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
+
+            checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
+            checkCudaErrors(cuCtxSetCurrent(ctx));
+
+            checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
+
+            IntPtr matmul_forward_kernel = IntPtr.Zero;
+
+            checkCudaErrors(cuModuleGetFunction(
+                out matmul_forward_kernel,
+                cuModule,
+                nameof(matmul_forward_kernel)));
+
+            model->matmul_forward_kernel = matmul_forward_kernel;
+
             // read in model from a checkpoint file
             using (SafeFileHandle model_file = new SafeFileHandle(fopen(checkpoint_path, "rb"), true)) {
 
@@ -699,8 +769,8 @@ unsafe static class train_gpt2 {
                 model->num_activations = num_activations;
                 model->acts_memory = malloc_and_point_activations(&model->acts, model->act_sizes);
                 // also create memory for caching inputs and targets
-                model->inputs = (int*)malloc(B * T * sizeof(int));
-                model->targets = (int*)malloc(B * T * sizeof(int)); // might be unused if we never have targets but it's small
+                model->inputs = (int*)cudaHostMalloc(B * T * sizeof(int));
+                model->targets = (int*)cudaHostMalloc(B * T * sizeof(int)); // might be unused if we never have targets but it's small
             } else {
                 // validate B,T is consistent with how we've allocated the memory before
                 // in principle we could get more clever here in the future, for now this is safest
@@ -758,19 +828,19 @@ unsafe static class train_gpt2 {
 
                 // now do the forward pass
                 layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
-                matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
+                matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
                 attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
-                matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
+                matmul_forward(model, l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
                 residual_forward(l_residual2, residual, l_attproj, B*T*C);
                 layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
-                matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
+                matmul_forward(model, l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
                 gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
-                matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
+                matmul_forward(model, l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
                 residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
             }
             residual = acts.residual3 + (L-1) * B * T * C; // last residual is in residual3
             layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
-            matmul_forward(acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
+            matmul_forward(model, acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
             softmax_forward(acts.probs, acts.logits, B, T, V);
 
             // also forward the cross-entropy loss function if we have the targets
@@ -904,8 +974,8 @@ unsafe static class train_gpt2 {
 
             // lazily allocate the memory for m_memory and v_memory
             if (model->m_memory == null) {
-                model->m_memory = (float*)malloc(model->num_parameters * sizeof(float));
-                model->v_memory = (float*)malloc(model->num_parameters * sizeof(float));
+                model->m_memory = (float*)cudaHostMalloc(model->num_parameters * sizeof(float));
+                model->v_memory = (float*)cudaHostMalloc(model->num_parameters * sizeof(float));
             }
 
             for (int i = 0; i < model->num_parameters; i++) {
@@ -928,14 +998,14 @@ unsafe static class train_gpt2 {
         }
 
         public static unsafe void gpt2_free(GPT2* model) {
-            free(model->params_memory);
-            free(model->grads_memory);
-            free(model->m_memory);
-            free(model->v_memory);
-            free(model->acts_memory);
-            free(model->grads_acts_memory);
-            free(model->inputs);
-            free(model->targets);
+            cudaHostFree(model->params_memory);
+            cudaHostFree(model->grads_memory);
+            cudaHostFree(model->m_memory);
+            cudaHostFree(model->v_memory);
+            cudaHostFree(model->acts_memory);
+            cudaHostFree(model->grads_acts_memory);
+            cudaHostFree(model->inputs);
+            cudaHostFree(model->targets);
         }
     }
 
@@ -968,7 +1038,7 @@ unsafe static class train_gpt2 {
             loader->current_position = 0; // start at the beginning
 
             // allocate space for B*T + 1 integers to store the inputs and targets
-            loader->batch = (int*)malloc((B * T + 1) * sizeof(int));
+            loader->batch = (int*)cudaHostMalloc((B * T + 1) * sizeof(int));
             kernel32.FillMemory(loader->batch, (B * T + 1) * sizeof(int), 0);
             loader->inputs = loader->batch;
             loader->targets = loader->batch + 1; // targets are shifted by one
@@ -999,7 +1069,7 @@ unsafe static class train_gpt2 {
         public static unsafe void dataloader_free(DataLoader* loader) {
             std.fclose(loader->tokens_file);
             loader->tokens_file = IntPtr.Zero;
-            free(loader->batch);
+            cudaHostFree(loader->batch);
             loader->batch = null;
         }
     }
@@ -1114,11 +1184,35 @@ unsafe static class train_gpt2 {
     static bool isprint(byte b) { return b >= 32 && b <= 126; }
     static bool isspace(byte b) { return b >= 9 && b <= 13; }
 
-#if train_gpt2
+#if train_gpt2_cuda
     static unsafe void Main(string[] args) {
+        checkCudaErrors(cuInit());
+        checkCudaErrors(cuDeviceGet(out var dev, 0));
+
+        cuPrintDeviceInfo(dev);
+
+        printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
+
+        byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
+
+        checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
+        checkCudaErrors(cuCtxSetCurrent(ctx));
+
+        checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
+
+        IntPtr matmul_forward_kernel = IntPtr.Zero;
+
+        checkCudaErrors(cuModuleGetFunction(
+            out matmul_forward_kernel,
+            cuModule,
+            nameof(matmul_forward_kernel)));
+
         // build the GPT-2 model from a checkpoint
         GPT2 model;
+
         GPT2.gpt2_build_from_checkpoint(&model, "gpt2_124M.bin");
+
+        model.matmul_forward_kernel = matmul_forward_kernel;
 
         // build the DataLoaders from tokens files. for now use tiny_shakespeare if available, else tiny_stories
         string tiny_stories_train = "data/TinyStories_train.bin";
@@ -1144,7 +1238,7 @@ unsafe static class train_gpt2 {
 
         // some memory for generating samples from the model
         ulong rng_state = 1337;
-        int* gen_tokens = (int*)malloc(B * T * sizeof(int));
+        int* gen_tokens = (int*)cudaHostMalloc(B * T * sizeof(int));
         const int genT = 64; // number of steps of inference we will do
 
         // train
@@ -1152,7 +1246,7 @@ unsafe static class train_gpt2 {
         for (int step = 0; step <= 10000; step++) {
 
             // once in a while estimate the validation loss
-            if (step % 10 == 0) {
+            if (step % 10 == 0 && false) {
                 float val_loss = 0.0f;
                 DataLoader.dataloader_reset(&val_loader);
                 for (int i = 0; i < val_num_batches; i++) {
@@ -1165,7 +1259,7 @@ unsafe static class train_gpt2 {
             }
 
             // once in a while do model inference to print generated text
-            if (step > 0 && step % 20 == 0) {
+            if (step > 0 && step % 20 == 0 && false) {
                 // fill up gen_tokens with the GPT2_EOT, which kicks off the generation
                 for (int i = 0; i < B * T; ++i) {
                     gen_tokens[i] = tokenizer.end_of_text;
@@ -1221,7 +1315,7 @@ unsafe static class train_gpt2 {
         DataLoader.dataloader_free(&val_loader);
         Tokenizer.tokenizer_free(ref tokenizer);
         GPT2.gpt2_free(&model);
-        free(gen_tokens);
+        cudaHostFree(gen_tokens);
 
         Console.ReadKey();
     }
