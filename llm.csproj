@@ -85,6 +85,7 @@
     <None Include="docs\vectorAdd_kernel64.fatbin" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="dev\layernorm_forward.cu" />
     <Content Include="train_gpt2.py" />
   </ItemGroup>
   <ItemGroup />

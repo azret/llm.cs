@@ -1,4 +1,11 @@
-﻿using System;
+﻿#define USE_HOST_MALLOC
+#define USE_CUDA
+
+#if !USE_HOST_MALLOC
+#undef USE_CUDA
+#endif
+
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -9,22 +16,32 @@ using static std;
 using static time;
 using static cuda;
 using static nvrtc;
+using System.Management.Instrumentation;
 
 unsafe static class train_gpt2_cuda {
     static unsafe void* cudaHostMalloc(int size) {
+#if USE_HOST_MALLOC
         void* p_d_Out;
         checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_Out, (ulong)size));
         return p_d_Out;
+#else
+        return malloc(size);
+#endif
     }
 
     static unsafe void cudaHostFree(void* p) {
+#if USE_HOST_MALLOC
         if (p != null) {
             checkCudaErrors(cuMemFreeHost(p));
         }
+#else
+        free(p);
+#endif
     }
 
     public unsafe struct GPT2 {
         public IntPtr matmul_forward_kernel;
+        public IntPtr layernorm_forward_kernel;
 
         // ----------------------------------------------------------------------------
         // all the individual layers' forward and backward passes
@@ -73,44 +90,82 @@ unsafe static class train_gpt2_cuda {
             }
         }
 
-        public static unsafe void layernorm_forward(float* out_, float* mean, float* rstd,
+        public static unsafe void layernorm_forward(GPT2* model, float* out_, float* mean, float* rstd,
                                float* inp, float* weight, float* bias,
                                int B, int T, int C) {
-            // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
-            // both inp and out are (B,T,C) of the activations
-            // mean and rstd are (B,T) buffers, to be used later in backward pass
-            // at each position (b,t) of the input, the C-dimensional vector
-            // of activations gets normalized, then scaled and shifted
-            float eps = 1e-5f;
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    // seek to the input position inp[b,t,:]
-                    float* x = inp + b * T * C + t * C;
-                    // calculate the mean
-                    float m = 0.0f;
-                    for (int i = 0; i < C; i++) {
-                        m += x[i];
+            if (model->layernorm_forward_kernel != IntPtr.Zero) {
+
+                // const int N = B * T;
+                // const int grid_size = ceil_div(N, block_size);
+                // layernorm_forward_kernel1 <<< grid_size, block_size >>> (out, mean, rstd, inp, weight, bias, N, C);
+                // cudaCheck(cudaGetLastError());
+
+                uint sqrt_block_size = 512;
+
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Weight, (void*)weight, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_mean, (void*)mean, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_rstdt, (void*)rstd, 0));
+                IntPtr d_Bias = IntPtr.Zero;
+                if (bias != null) {
+                    checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_Bias, (void*)bias, 0));
+                }
+
+                int d_T = T;
+                int d_C = C;
+                int d_N = B * T;
+
+                void*[] args = { &d_Out, &d_mean, &rstd, & d_In, &d_Weight, &d_Bias, &d_N, &d_C};
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->layernorm_forward_kernel,
+                    CEIL_DIV((uint)d_N, sqrt_block_size), 1, 1,
+                    sqrt_block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                checkCudaErrors(cuCtxSynchronize());
+
+            } else {
+                // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
+                // both inp and out are (B,T,C) of the activations
+                // mean and rstd are (B,T) buffers, to be used later in backward pass
+                // at each position (b,t) of the input, the C-dimensional vector
+                // of activations gets normalized, then scaled and shifted
+                float eps = 1e-5f;
+                for (int b = 0; b < B; b++) {
+                    for (int t = 0; t < T; t++) {
+                        // seek to the input position inp[b,t,:]
+                        float* x = inp + b * T * C + t * C;
+                        // calculate the mean
+                        float m = 0.0f;
+                        for (int i = 0; i < C; i++) {
+                            m += x[i];
+                        }
+                        m = m / C;
+                        // calculate the variance (without any bias correction)
+                        float v = 0.0f;
+                        for (int i = 0; i < C; i++) {
+                            float xshift = x[i] - m;
+                            v += xshift * xshift;
+                        }
+                        v = v / C;
+                        // calculate the rstd (reciprocal standard deviation)
+                        float s = 1.0f / sqrtf(v + eps);
+                        // seek to the output position in out[b,t,:]
+                        float* out_bt = out_ + b * T * C + t * C;
+                        for (int i = 0; i < C; i++) {
+                            float n = (s * (x[i] - m)); // normalize
+                            float o = n * weight[i] + bias[i]; // scale and shift
+                            out_bt[i] = o; // write
+                        }
+                        // cache the mean and rstd for the backward pass later
+                        mean[b * T + t] = m;
+                        rstd[b * T + t] = s;
                     }
-                    m = m/C;
-                    // calculate the variance (without any bias correction)
-                    float v = 0.0f;
-                    for (int i = 0; i < C; i++) {
-                        float xshift = x[i] - m;
-                        v += xshift * xshift;
-                    }
-                    v = v/C;
-                    // calculate the rstd (reciprocal standard deviation)
-                    float s = 1.0f / sqrtf(v + eps);
-                    // seek to the output position in out[b,t,:]
-                    float* out_bt = out_ + b * T * C + t * C;
-                    for (int i = 0; i < C; i++) {
-                        float n = (s * (x[i] - m)); // normalize
-                        float o = n * weight[i] + bias[i]; // scale and shift
-                        out_bt[i] = o; // write
-                    }
-                    // cache the mean and rstd for the backward pass later
-                    mean[b * T + t] = m;
-                    rstd[b * T + t] = s;
                 }
             }
         }
@@ -161,7 +216,9 @@ unsafe static class train_gpt2_cuda {
         public static unsafe void matmul_forward(GPT2* model, float* out_,
                             float* inp, float* weight, float* bias,
                             int B, int T, int C, int OC) {
+
             if (model->matmul_forward_kernel != IntPtr.Zero) {
+
                 uint sqrt_block_size = 16;
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
@@ -192,6 +249,7 @@ unsafe static class train_gpt2_cuda {
                 checkCudaErrors(cuCtxSynchronize());
 
             } else {
+
                 // most of the running time is spent here and in matmul_backward
                 // OC is short for "output channels"
                 // inp is (B,T,C), weight is (OC, C), bias is (OC)
@@ -619,29 +677,33 @@ unsafe static class train_gpt2_cuda {
         }
 
         public static unsafe void gpt2_build_from_checkpoint(GPT2* model, string checkpoint_path) {
+#if USE_HOST_MALLOC
             checkCudaErrors(cuInit());
             checkCudaErrors(cuDeviceGet(out var dev, 0));
 
             cuPrintDeviceInfo(dev);
 
-            printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
-
-            byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
-
             checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
             checkCudaErrors(cuCtxSetCurrent(ctx));
 
+#endif
+#if USE_CUDA
+            printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
+            byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
             checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
-
             IntPtr matmul_forward_kernel = IntPtr.Zero;
-
-            checkCudaErrors(cuModuleGetFunction(
-                out matmul_forward_kernel,
-                cuModule,
-                nameof(matmul_forward_kernel)));
+            checkCudaErrors(cuModuleGetFunction(out matmul_forward_kernel, cuModule, nameof(matmul_forward_kernel)));
 
             model->matmul_forward_kernel = matmul_forward_kernel;
 
+            printf("> Compiling CUDA source file %s...\n", "layernorm_forward.cu");
+            ptx = CompileFromEmbeddedResource("LLM.dev.layernorm_forward.cu");
+            checkCudaErrors(cuModuleLoadData(out cuModule, ptx));
+            IntPtr layernorm_forward_kernel = IntPtr.Zero;
+            checkCudaErrors(cuModuleGetFunction(out layernorm_forward_kernel, cuModule, nameof(layernorm_forward_kernel)));
+
+            model->layernorm_forward_kernel = layernorm_forward_kernel;
+#endif
             // read in model from a checkpoint file
             using (SafeFileHandle model_file = new SafeFileHandle(fopen(checkpoint_path, "rb"), true)) {
 
@@ -827,19 +889,19 @@ unsafe static class train_gpt2_cuda {
                 float* l_residual3 = acts.residual3 + l * B * T * C;
 
                 // now do the forward pass
-                layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+                layernorm_forward(model, l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
                 matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
                 attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
                 matmul_forward(model, l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
                 residual_forward(l_residual2, residual, l_attproj, B*T*C);
-                layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+                layernorm_forward(model, l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
                 matmul_forward(model, l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
                 gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
                 matmul_forward(model, l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
                 residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
             }
             residual = acts.residual3 + (L-1) * B * T * C; // last residual is in residual3
-            layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
+            layernorm_forward(model, acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
             matmul_forward(model, acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
             softmax_forward(acts.probs, acts.logits, B, T, V);
 
