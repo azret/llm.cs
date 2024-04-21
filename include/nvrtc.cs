@@ -1,9 +1,21 @@
 ﻿using System;
+using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public static class nvrtc {
-    public static byte[] compile(string src, string name) {
+    public static byte[] CompileFromEmbeddedResource(string name) {
+        string srcCode = null;
+        using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
+        using (StreamReader reader = new StreamReader(stream)) {
+            srcCode = reader.ReadToEnd();
+        }
+        byte[] ptx = Compile(srcCode, "matmul_forward");
+        return ptx;
+    }
+
+    public static byte[] Compile(string src, string name) {
 
         nvrtcCheck(nvrtcCreateProgram(
             out var prog,
