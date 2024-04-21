@@ -68,7 +68,6 @@
     <Compile Include="include\atomic.cs" />
     <Compile Include="include\math.cs" />
     <Compile Include="include\cuda.cs" />
-    <Compile Include="GPT2.cs" />
     <Compile Include="docs\vectorAddMemAlloc.cs" />
     <Compile Include="include\nvrtc.cs" />
     <Compile Include="include\std.cs" />

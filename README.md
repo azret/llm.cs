@@ -38,66 +38,100 @@ num_parameters: 124439808
 batch_size: 4
 seq_len: 64
 num_activations: 73323776
--43.4317 -43.43174
--39.83643 -39.83645
--43.06594 -43.06603
+-43.431700 -43.431750
+-39.836430 -39.836470
+-43.065940 -43.066040
 OK (LOGITS)
-LOSS OK: 5.269891 5.270009
+LOSS OK: 5.269889 5.270009
 dwte
-TENSOR OK
+OK [-0.002320 -0.002320]
+OK [0.002072 0.002072]
+OK [0.003716 0.003717]
+TENSOR OK, maxdiff = 0.00135088
 dwpe
-TENSOR OK
+OK [-0.005118 -0.005111]
+OK [-0.000001 -0.000011]
+OK [-0.003267 -0.003262]
+TENSOR OK, maxdiff = 4.248903E-05
 dln1w
-TENSOR OK
+OK [-0.007520 -0.007524]
+OK [0.008624 0.008641]
+OK [0.005003 0.005028]
+TENSOR OK, maxdiff = 0.003455976
 dln1b
-TENSOR OK
+OK [-0.038494 -0.038466]
+OK [-0.030547 -0.030601]
+OK [0.010189 0.010223]
+TENSOR OK, maxdiff = 0.001481121
 dqkvw
-TENSOR OK
+OK [-0.000031 -0.000031]
+OK [-0.000026 -0.000025]
+OK [-0.000064 -0.000064]
+TENSOR OK, maxdiff = 0.0005261153
 dqkvb
-TENSOR OK
+OK [-0.000414 -0.000411]
+OK [-0.000410 -0.000412]
+OK [0.000113 0.000114]
+TENSOR OK, maxdiff = 0.0002976814
 dattprojw
-TENSOR OK
+OK [0.000081 0.000080]
+OK [-0.000005 -0.000005]
+OK [-0.000019 -0.000019]
+TENSOR OK, maxdiff = 0.000223374
 dattprojb
-TENSOR OK
-// You will see the same issue in the original C repo if you compile without fast floating point.
-// PyTorch is compiled with fast floating points so we get this little discrepancy.
+OK [0.000456 0.000469]
+OK [-0.009969 -0.009977]
+OK [-0.001794 -0.001802]
+TENSOR OK, maxdiff = 0.0002002455
 dln2w
-NOT OK 0.9522735 0.9629698
-TENSOR NOT OK
+OK [-0.018372 -0.018314]
+OK [0.004811 0.004814]
+OK [0.008084 0.008092]
+TENSOR OK, maxdiff = 0.01098001
 dln2b
-TENSOR OK
+OK [-0.026405 -0.026366]
+OK [-0.016712 -0.016694]
+OK [0.001067 0.001080]
+TENSOR OK, maxdiff = 0.0009260178
 dfcw
-TENSOR OK
+OK [0.000438 0.000440]
+OK [0.000000 0.000000]
+OK [-0.000153 -0.000154]
+TENSOR OK, maxdiff = 0.0009153634
 dfcb
-TENSOR OK
+OK [0.003282 0.003291]
+OK [0.002038 0.002043]
+OK [-0.001386 -0.001386]
+TENSOR OK, maxdiff = 0.0002241929
 dfcprojw
-TENSOR OK
+OK [0.000678 0.000680]
+OK [0.000073 0.000073]
+OK [-0.000415 -0.000416]
+TENSOR OK, maxdiff = 0.00044487
 dfcprojb
-TENSOR OK
+OK [0.003572 0.003582]
+OK [-0.007148 -0.007157]
+OK [-0.001955 -0.001963]
+TENSOR OK, maxdiff = 0.0001360756
 dlnfw
-TENSOR OK
+OK [-0.000022 -0.000022]
+OK [0.000811 0.000811]
+OK [0.001161 0.001161]
+TENSOR OK, maxdiff = 0.0003775135
 dlnfb
-TENSOR OK
-step 0: loss 5.269891 (took 5045.38579999644 ms)
-step 1: loss 4.059391 (took 5035.20439998829 ms)
-step 2: loss 3.374038 (took 5194.30620000639 ms)
-step 3: loss 2.799953 (took 5817.74869999208 ms)
-step 4: loss 2.315158 (took 6123.7805000128 ms)
-step 5: loss 1.849267 (took 6058.85979998857 ms)
-step 6: loss 1.395222 (took 5349.43039999052 ms)
-step 7: loss 0.998747 (took 5416.41570000502 ms)
-step 8: loss 0.6258392 (took 5462.88490000006 ms)
-step 9: loss 0.3783574 (took 5483.15609998826 ms)
-loss ok at step 0: 5.269891 5.270007
-loss ok at step 1: 4.059391 4.059707
-loss ok at step 2: 3.374038 3.375123
-loss ok at step 3: 2.799953 2.800783
-loss ok at step 4: 2.315158 2.315382
-loss ok at step 5: 1.849267 1.849029
-loss ok at step 6: 1.395222 1.394656
-loss ok at step 7: 0.998747 0.9991465
-loss ok at step 8: 0.6258392 0.6240804
-loss ok at step 9: 0.3783574 0.376511
-// See comment above...
-overall okay: False
+OK [-0.011101 -0.011101]
+OK [0.008007 0.008007]
+OK [-0.004763 -0.004768]
+TENSOR OK, maxdiff = 6.910553E-05
+step 0: loss 5.269889 (took 5391.000000 ms) OK = True
+step 1: loss 4.059389 (took 5453.000000 ms) OK = True
+step 2: loss 3.374211 (took 5516.000000 ms) OK = True
+step 3: loss 2.800126 (took 5593.000000 ms) OK = True
+step 4: loss 2.315312 (took 5687.000000 ms) OK = True
+step 5: loss 1.849348 (took 5750.000000 ms) OK = True
+step 6: loss 1.395218 (took 5765.000000 ms) OK = True
+step 7: loss 0.998614 (took 5750.000000 ms) OK = True
+step 8: loss 0.625540 (took 5797.000000 ms) OK = True
+step 9: loss 0.378013 (took 5812.000000 ms) OK = True
+overall okay: True
 ```
