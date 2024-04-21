@@ -2,6 +2,15 @@
 
 This is a reference C# port of the @karpathy's [LLM training in simple, raw C/CUDA](https://github.com/karpathy/llm.c)
 
+## status
+
+- CPU ✅
+    - all forward layers ✅
+    - all backward layers ✅
+      
+- CUDA 🚧
+    - matmul_forward ✅
+      
 ## notes
 
 The C#/CPU port is numerically identical to the C/CPU version. Current best run on a CPU is ~5s per iteration. We'll achieve an even better result when all the layers are parallelized. ✌️
