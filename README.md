@@ -1,4 +1,4 @@
-# LLM.C#
+# LLM.CS
 
 This is a **C#** port of [LLM training in simple, raw C/CUDA](https://github.com/karpathy/llm.c) by @[karpathy](https://github.com/karpathy) 
 
