@@ -3,7 +3,7 @@ using System;
 using static cuda;
 using static nvrtc;
 using static std;
-
+using static common;
 unsafe static class matmul_forward {
     // Reference implementation
     public static void matmul_forward_cpu(float* _Out,
@@ -39,16 +39,10 @@ unsafe static class matmul_forward {
 
         cuPrintDeviceInfo(dev);
 
-        printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
-
-        byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
-
         checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
         checkCudaErrors(cuCtxSetCurrent(ctx));
 
-        checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
-
-        Console.WriteLine();
+        cuPrintCurrentContextInfo();
 
         ulong seed = 37;
 
@@ -110,19 +104,27 @@ unsafe static class matmul_forward {
 
         IntPtr matmul_forward_kernel = IntPtr.Zero;
 
+        printf("> Compiling CUDA source file %s...\n", "train_gpt2_cuda.cu");
+
+        byte[] ptx = CompileFromEmbeddedResource("LLM.dev.train_gpt2_cuda.cu");
+
+        checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
+
         checkCudaErrors(cuModuleGetFunction(
             out matmul_forward_kernel,
             cuModule,
             nameof(matmul_forward_kernel)));
 
-        uint sqrt_block_size = 4;
+        Console.WriteLine();
+
+        uint block_size = 16;
 
         void*[] args = { &d_Out, &d_In, &d_Weight, &d_Bias, &BT, &C, &OC };
 
         checkCudaErrors(cuLaunchKernel(
             matmul_forward_kernel,
-            ceil_div((uint)B * (uint)T, sqrt_block_size), ceil_div((uint)OC, sqrt_block_size), 1,
-            sqrt_block_size, sqrt_block_size, 1,
+            CEIL_DIV((uint)B * (uint)T, block_size), CEIL_DIV((uint)OC, block_size), 1,
+            block_size, block_size, 1,
             0,
             IntPtr.Zero,
             args,
@@ -171,28 +173,6 @@ unsafe static class matmul_forward {
         Console.ReadKey();
 
         return 0;
-    }
-
-    static bool validate_results(float* d_Out, float* h_Out, int N) {
-        bool ok = true;
-        int faults = 0;
-        int prints = 0;
-        for (int i = 0; i < N; ++i) {
-            if (Math.Abs(d_Out[i] - h_Out[i]) > 1e-4f) {
-                ok = false;
-                if (faults < 7) {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"ERROR: CPU: {h_Out[i]} != GPU: {d_Out[i]}");
-                    Console.ResetColor();
-                }
-                faults++;
-                break;
-            } else {
-                if (faults == 0 && prints < 5) Console.WriteLine($"OK: CPU: {h_Out[i]} == GPU: {d_Out[i]}");
-                prints++;
-            }
-        }
-        return ok;
     }
 
 #endif

@@ -15,8 +15,7 @@ using Microsoft.Win32.SafeHandles;
 using static std;
 using static time;
 using static cuda;
-using static nvrtc;
-using System.Reflection;
+using static nvrtc; 
 
 unsafe static class train_gpt2_cuda {
     static unsafe void* cudaHostMalloc(int size) {
@@ -94,7 +93,7 @@ unsafe static class train_gpt2_cuda {
 
         public static unsafe void layernorm_forward(GPT2* model, float* out_, float* mean, float* rstd,
                                float* inp, float* weight, float* bias,
-                               int B, int T, int C) {
+                               int B, int T, int C, bool bSynchronize) {
             if (model->layernorm_forward_kernel != IntPtr.Zero) {
 
                 // const int N = B * T;
@@ -102,7 +101,7 @@ unsafe static class train_gpt2_cuda {
                 // layernorm_forward_kernel1 <<< grid_size, block_size >>> (out, mean, rstd, inp, weight, bias, N, C);
                 // cudaCheck(cudaGetLastError());
 
-                uint sqrt_block_size = 512;
+                uint block_size = 256;
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
@@ -122,14 +121,14 @@ unsafe static class train_gpt2_cuda {
 
                 checkCudaErrors(cuLaunchKernel(
                     model->layernorm_forward_kernel,
-                    CEIL_DIV((uint)d_N, sqrt_block_size), 1, 1,
-                    sqrt_block_size, 1, 1,
+                    CEIL_DIV((uint)d_N, block_size), 1, 1,
+                    block_size, 1, 1,
                     0,
                     IntPtr.Zero,
                     args,
                     null));
 
-                checkCudaErrors(cuCtxSynchronize());
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
 
             } else {
                 // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
@@ -217,7 +216,7 @@ unsafe static class train_gpt2_cuda {
 
         public static unsafe void matmul_forward(GPT2* model, float* out_,
                             float* inp, float* weight, float* bias,
-                            int B, int T, int C, int OC) {
+                            int B, int T, int C, int OC, bool bSynchronize) {
 
             if (model->matmul_forward_kernel != IntPtr.Zero) {
 
@@ -248,7 +247,7 @@ unsafe static class train_gpt2_cuda {
                     args,
                     null));
 
-                checkCudaErrors(cuCtxSynchronize());
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
 
             } else {
 
@@ -447,12 +446,36 @@ unsafe static class train_gpt2_cuda {
         }
 
         static float GELU_SCALING_FACTOR = sqrtf(2.0f / (float)Math.PI);
-        public static unsafe void gelu_forward(float* out_, float* inp, int N) {
-            // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
-            for (int i = 0; i < N; i++) {
-                float x = inp[i];
-                float cube = 0.044715f * x * x * x;
-                out_[i] = 0.5f * x * (1.0f + tanhf(GELU_SCALING_FACTOR * (x + cube)));
+        public static unsafe void gelu_forward(GPT2* model, float* out_, float* inp, int N, bool bSynchronize) {
+            if (model->gelu_kernel != IntPtr.Zero) {
+
+                const uint block_size = 128;
+
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
+
+                int d_N = N;
+
+                void*[] args = { &d_Out, &d_In, &d_N };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->gelu_kernel,
+                    CEIL_DIV((uint)N, block_size), 1, 1,
+                    block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
+
+            } else {
+                // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
+                for (int i = 0; i < N; i++) {
+                    float x = inp[i];
+                    float cube = 0.044715f * x * x * x;
+                    out_[i] = 0.5f * x * (1.0f + tanhf(GELU_SCALING_FACTOR * (x + cube)));
+                }
             }
         }
 
@@ -474,11 +497,6 @@ unsafe static class train_gpt2_cuda {
 #pragma float_control(pop)
 
         public static unsafe void residual_forward(GPT2* model, float* out_, float* inp1, float* inp2, int N, bool bSynchronize) {
-            // const int block_size = 256;
-            // const int grid_size = CEIL_DIV(N, block_size);
-            // residual_forward_kernel <<< grid_size, block_size >>> (out, inp1, inp2, N);
-            // cudaCheck(cudaGetLastError());
-
             if (model->residual_forward_kernel != IntPtr.Zero) {
 
                 uint block_size = 256;
@@ -487,7 +505,7 @@ unsafe static class train_gpt2_cuda {
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In1, (void*)inp1, 0));
-                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In2, (void*)inp1, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In2, (void*)inp2, 0));
 
                 int d_N = N;
 
@@ -502,7 +520,7 @@ unsafe static class train_gpt2_cuda {
                     args,
                     null));
 
-                checkCudaErrors(cuCtxSynchronize());
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
 
             } else {
 
@@ -722,6 +740,7 @@ unsafe static class train_gpt2_cuda {
             checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
             checkCudaErrors(cuCtxSetCurrent(ctx));
 
+            cuPrintCurrentContextInfo();
 #endif
 #if USE_CUDA
             gpt2_load_kernels(model);
@@ -802,6 +821,8 @@ unsafe static class train_gpt2_cuda {
             checkCudaErrors(cuModuleGetFunction(out model->matmul_forward_kernel, cuModule, "matmul_forward_kernel"));
             checkCudaErrors(cuModuleGetFunction(out model->layernorm_forward_kernel, cuModule, "layernorm_forward_kernel"));
             checkCudaErrors(cuModuleGetFunction(out model->residual_forward_kernel, cuModule, "residual_forward_kernel"));
+            checkCudaErrors(cuModuleGetFunction(out model->gelu_kernel, cuModule, "gelu_kernel"));
+
         }
 
         public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -921,20 +942,20 @@ unsafe static class train_gpt2_cuda {
                 float* l_residual3 = acts.residual3 + l * B * T * C;
 
                 // now do the forward pass
-                layernorm_forward(model, l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
-                matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
+                layernorm_forward(model, l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C, false);
+                matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C, true);
                 attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
-                matmul_forward(model, l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
-                residual_forward(model, l_residual2, residual, l_attproj, B*T*C, true);
-                layernorm_forward(model, l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
-                matmul_forward(model, l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
-                gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
-                matmul_forward(model, l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
-                residual_forward(model, l_residual3, l_residual2, l_fcproj, B*T*C, true);
+                matmul_forward(model, l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C, false);
+                residual_forward(model, l_residual2, residual, l_attproj, B*T*C, false);
+                layernorm_forward(model, l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C, false);
+                matmul_forward(model, l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C, false);
+                gelu_forward(model, l_fch_gelu, l_fch, B*T*4*C, false);
+                matmul_forward(model, l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C, false);
+                residual_forward(model, l_residual3, l_residual2, l_fcproj, B*T*C, false);
             }
             residual = acts.residual3 + (L-1) * B * T * C; // last residual is in residual3
-            layernorm_forward(model, acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C);
-            matmul_forward(model, acts.logits, acts.lnf, params_.wte, null, B, T, C, V);
+            layernorm_forward(model, acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params_.lnfw, params_.lnfb, B, T, C, false);
+            matmul_forward(model, acts.logits, acts.lnf, params_.wte, null, B, T, C, V, true);
             softmax_forward(acts.probs, acts.logits, B, T, V);
 
             // also forward the cross-entropy loss function if we have the targets
@@ -1280,33 +1301,10 @@ unsafe static class train_gpt2_cuda {
 
 #if train_gpt2_cuda
     static unsafe void Main(string[] args) {
-        checkCudaErrors(cuInit());
-        checkCudaErrors(cuDeviceGet(out var dev, 0));
-
-        cuPrintDeviceInfo(dev);
-
-        printf("> Compiling CUDA source file %s...\n", "matmul_forward.cu");
-
-        byte[] ptx = CompileFromEmbeddedResource("LLM.dev.matmul_forward.cu");
-
-        checkCudaErrors(cuCtxCreate_v2(out var ctx, CUctx_flags.CU_CTX_SCHED_AUTO, dev));
-        checkCudaErrors(cuCtxSetCurrent(ctx));
-
-        checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
-
-        IntPtr matmul_forward_kernel = IntPtr.Zero;
-
-        checkCudaErrors(cuModuleGetFunction(
-            out matmul_forward_kernel,
-            cuModule,
-            nameof(matmul_forward_kernel)));
-
         // build the GPT-2 model from a checkpoint
         GPT2 model;
 
         GPT2.gpt2_build_from_checkpoint(&model, "gpt2_124M.bin");
-
-        model.matmul_forward_kernel = matmul_forward_kernel;
 
         // build the DataLoaders from tokens files. for now use tiny_shakespeare if available, else tiny_stories
         string tiny_stories_train = "data/TinyStories_train.bin";

@@ -4,7 +4,7 @@ using static cuda;
 using static nvrtc;
 using static std;
 
-unsafe static class residual_forward {
+public static unsafe class residual_forward {
     static unsafe void residual_forward_cpu(float* out_, float* inp1, float* inp2, int N) {
         for (int i = 0; i < N; i++) {
             out_[i] = inp1[i] + inp2[i];
@@ -136,28 +136,6 @@ extern ""C"" __global__  void residual_forward_kernel(float* out, const float* i
         Console.ReadKey();
 
         return 0;
-    }
-
-    static bool validate_results(float* d_Mem, float* h_Mem, int N) {
-        bool ok = true;
-        int faults = 0;
-        int prints = 0;
-        for (int i = 0; i < N; ++i) {
-            if (Math.Abs(d_Mem[i] - h_Mem[i]) > 1e-4f) {
-                ok = false;
-                if (faults < 7) {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"ERROR: CPU: {h_Mem[i]} != GPU: {d_Mem[i]}");
-                    Console.ResetColor();
-                }
-                faults++;
-                break;
-            } else {
-                if (faults == 0 && prints < 5) Console.WriteLine($"OK: CPU: {h_Mem[i]} == GPU: {d_Mem[i]}");
-                prints++;
-            }
-        }
-        return ok;
     }
 
 #endif

@@ -21,7 +21,7 @@ public static class cuda {
 
     public static unsafe void cuPrintCurrentContextInfo() {
         checkCudaErrors(cuMemGetInfo_v2(out ulong free, out ulong total));
-        std.printf("> %s of %s\n",
+        std.printf("> Mem: %s of %s\n",
             GetMemSize(free),
             GetMemSize(total));
     }
@@ -60,7 +60,6 @@ public static class cuda {
     public static uint CEIL_DIV(uint dividend, uint divisor) {
         return (dividend + divisor - 1) / divisor;
     }
-
 
     [DllImport("nvcuda")]
     public static extern CUresult cuDriverGetVersion(out int driverVersion);
