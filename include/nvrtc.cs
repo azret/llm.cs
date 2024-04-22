@@ -11,11 +11,11 @@ public static class nvrtc {
         using (StreamReader reader = new StreamReader(stream)) {
             srcCode = reader.ReadToEnd();
         }
-        byte[] ptx = Compile(srcCode, "matmul_forward");
+        byte[] ptx = CompileFromSourceCode(srcCode, "matmul_forward");
         return ptx;
     }
 
-    public static byte[] Compile(string src, string name) {
+    public static byte[] CompileFromSourceCode(string src, string name) {
 
         nvrtcCheck(nvrtcCreateProgram(
             out var prog,

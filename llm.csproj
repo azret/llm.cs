@@ -32,9 +32,9 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
-    <Optimize>true</Optimize>
+    <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;test_gpt2_cuda</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;residual_forward</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>2</WarningLevel>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -58,6 +58,7 @@
     <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="dev\residual_forward.cs" />
     <Compile Include="dev\matmul_forward.cs" />
     <Compile Include="docs\simple_printf.cs" />
     <Compile Include="docs\vectorAddHostAlloc.cs" />
@@ -75,8 +76,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <EmbeddedResource Include="dev\layernorm_forward.cu" />
-    <EmbeddedResource Include="dev\matmul_forward.cu" />
+    <EmbeddedResource Include="dev\train_gpt2_cuda.cu" />
     <None Include="docs\simple_printf.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

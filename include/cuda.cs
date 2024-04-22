@@ -19,7 +19,7 @@ public static class cuda {
         std.free(devName);
     }
 
-    public static unsafe void cuPrintCurrentContextInfo(int dev) {
+    public static unsafe void cuPrintCurrentContextInfo() {
         checkCudaErrors(cuMemGetInfo_v2(out ulong free, out ulong total));
         std.printf("> %s of %s\n",
             GetMemSize(free),
