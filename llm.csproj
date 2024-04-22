@@ -75,6 +75,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <EmbeddedResource Include="dev\layernorm_forward.cu" />
     <EmbeddedResource Include="dev\matmul_forward.cu" />
     <None Include="docs\simple_printf.cu">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
@@ -85,7 +86,6 @@
     <None Include="docs\vectorAdd_kernel64.fatbin" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="dev\layernorm_forward.cu" />
     <Content Include="train_gpt2.py" />
   </ItemGroup>
   <ItemGroup />

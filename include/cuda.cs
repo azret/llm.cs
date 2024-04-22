@@ -19,6 +19,31 @@ public static class cuda {
         std.free(devName);
     }
 
+    public static unsafe void cuPrintCurrentContextInfo(int dev) {
+        checkCudaErrors(cuMemGetInfo_v2(out ulong free, out ulong total));
+        std.printf("> %s of %s\n",
+            GetMemSize(free),
+            GetMemSize(total));
+    }
+
+    static string GetMemSize(ulong size) {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = size;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1) {
+            order++;
+            len = len / 1024;
+        }
+        string mem = string.Format("{0:0.##} {1}", len, sizes[order]);
+        return mem;
+    }
+
+    [DllImport("nvcuda")]
+    public static extern CUresult cuMemGetInfo_v2(out ulong free, out ulong total);
+
+    [DllImport("nvcuda")]
+    public static extern CUresult cuDeviceTotalMem(out ulong bytes, int dev);
+
     public const int MEMORY_ALIGNMENT = 4096;
 
     // Macro to aligned up to the memory
