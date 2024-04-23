@@ -11,7 +11,7 @@ public static class nvrtc {
         using (StreamReader reader = new StreamReader(stream)) {
             srcCode = reader.ReadToEnd();
         }
-        byte[] ptx = CompileFromSourceCode(srcCode, "matmul_forward");
+        byte[] ptx = CompileFromSourceCode(srcCode, name);
         return ptx;
     }
 
@@ -22,7 +22,23 @@ public static class nvrtc {
             src, name, 0, null, null));
 
         try {
-            var res = nvrtcCompileProgram(prog, 0, null);
+            string[] options = new string[]
+            {
+                // "--include-path=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.39.33519\\include",
+                // "--include-path=C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.22621.0\\ucrt"
+            };
+
+            IntPtr[] optionsPtr = new IntPtr[options.Length];
+
+            for (int i = 0; i < optionsPtr.Length; i++) {
+                optionsPtr[i] = Marshal.StringToHGlobalAnsi(options[i]);
+            }
+
+            var res = nvrtcCompileProgram(prog, optionsPtr.Length, optionsPtr);
+
+            for (int i = 0; i < optionsPtr.Length; i++) {
+                Marshal.FreeHGlobal(optionsPtr[i]);
+            }
 
             nvrtcCheck(nvrtcGetProgramLogSize(prog, out IntPtr logSizeRet));
 

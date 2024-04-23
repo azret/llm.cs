@@ -1127,7 +1127,7 @@ unsafe static class train_gpt2 {
         string tiny_shakespeare_val = "data/tiny_shakespeare_val.bin";
         string train_tokens = File.Exists(tiny_shakespeare_train) ? tiny_shakespeare_train : tiny_stories_train;
         string val_tokens = File.Exists(tiny_shakespeare_val) ? tiny_shakespeare_val : tiny_stories_val;
-        int B = 8; // batch size 4 (i.e. 4 independent token sequences will be trained on)
+        int B = 4; // batch size 4 (i.e. 4 independent token sequences will be trained on)
         int T = 64; // sequence length 64 (i.e. each sequence is 64 tokens long). must be <= maxT, which is 1024 for GPT-2
         DataLoader train_loader;
         DataLoader.dataloader_init(&train_loader, train_tokens, B, T);
@@ -1204,8 +1204,8 @@ unsafe static class train_gpt2 {
             }
 
             // do a training step
-            clock_gettime(CLOCK_MONOTONIC, &start);
             DataLoader.dataloader_next_batch(&train_loader);
+            clock_gettime(CLOCK_MONOTONIC, &start);
             GPT2.gpt2_forward(&model, train_loader.inputs, train_loader.targets, B, T);
             GPT2.gpt2_zero_grad(&model);
             GPT2.gpt2_backward(&model);

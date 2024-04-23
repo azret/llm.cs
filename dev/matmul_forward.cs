@@ -4,6 +4,8 @@ using static cuda;
 using static nvrtc;
 using static std;
 using static common;
+using static time;
+
 unsafe static class matmul_forward {
     // Reference implementation
     public static void matmul_forward_cpu(float* _Out,
@@ -30,10 +32,23 @@ unsafe static class matmul_forward {
         }
     }
 
+    private static unsafe void matmul_forward_1(int B, int T, int BT, int C, int OC, IntPtr d_Out, IntPtr d_In, IntPtr d_Weight,
+        IntPtr d_Bias, IntPtr matmul_forward_kernel, uint block_size) {
+
+        void*[] args = { &d_Out, &d_In, &d_Weight, &d_Bias, &BT, &C, &OC };
+
+        checkCudaErrors(cuLaunchKernel(
+            matmul_forward_kernel,
+            CEIL_DIV((uint)B * (uint)T, block_size), CEIL_DIV((uint)OC, block_size), 1,
+            block_size, block_size, 1,
+            0,
+            IntPtr.Zero,
+            args,
+            null));
+    }
+
 #if matmul_forward
     static unsafe int Main() {
-        bool useHostAlloc = true;
-
         checkCudaErrors(cuInit());
         checkCudaErrors(cuDeviceGet(out var dev, 0));
 
@@ -46,7 +61,7 @@ unsafe static class matmul_forward {
 
         ulong seed = 37;
 
-        int B = 4;
+        int B = 5;
         int T = 64;
         int BT = B * T;
         int C = 768;
@@ -72,24 +87,10 @@ unsafe static class matmul_forward {
         IntPtr d_Weight;
         IntPtr d_Bias;
 
-        if (useHostAlloc) {
-
-            checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_Out, (ulong)(B * T * OC * sizeof(float))));
-            checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_In, (ulong)(B * T * C * sizeof(float))));
-            checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_Weight, (ulong)(OC * C * sizeof(float))));
-            checkCudaErrors(cuMemAllocHost_v2((void**)&p_d_Bias, (ulong)(OC * sizeof(float))));
-
-            checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_Out, (void*)p_d_Out, 0));
-            checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_In, (void*)p_d_In, 0));
-            checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_Weight, (void*)p_d_Weight, 0));
-            checkCudaErrors(cuMemHostGetDevicePointer_v2(out d_Bias, (void*)p_d_Bias, 0));
-
-        } else {
-            checkCudaErrors(cuMemAlloc_v2(out d_Out, (ulong)(B * T * OC * sizeof(float))));
-            checkCudaErrors(cuMemAlloc_v2(out d_In, (ulong)(B * T * C * sizeof(float))));
-            checkCudaErrors(cuMemAlloc_v2(out d_Weight, (ulong)(OC * C * sizeof(float))));
-            checkCudaErrors(cuMemAlloc_v2(out d_Bias, (ulong)(OC * sizeof(float))));
-        }
+        checkCudaErrors(cuMemAlloc_v2(out d_Out, (ulong)(B * T * OC * sizeof(float))));
+        checkCudaErrors(cuMemAlloc_v2(out d_In, (ulong)(B * T * C * sizeof(float))));
+        checkCudaErrors(cuMemAlloc_v2(out d_Weight, (ulong)(OC * C * sizeof(float))));
+        checkCudaErrors(cuMemAlloc_v2(out d_Bias, (ulong)(OC * sizeof(float))));
 
         checkCudaErrors(cuMemcpyHtoD_v2(d_Out, h_Out, (ulong)(B * T * OC * sizeof(float))));
         checkCudaErrors(cuMemcpyHtoD_v2(d_In, h_In, (ulong)(B * T * C * sizeof(float))));
@@ -117,44 +118,14 @@ unsafe static class matmul_forward {
 
         Console.WriteLine();
 
-        uint block_size = 16;
+        uint block_size = 4;
 
-        void*[] args = { &d_Out, &d_In, &d_Weight, &d_Bias, &BT, &C, &OC };
-
-        checkCudaErrors(cuLaunchKernel(
-            matmul_forward_kernel,
-            CEIL_DIV((uint)B * (uint)T, block_size), CEIL_DIV((uint)OC, block_size), 1,
-            block_size, block_size, 1,
-            0,
-            IntPtr.Zero,
-            args,
-            null));
-
-        checkCudaErrors(cuCtxSynchronize());
+        matmul_forward_1(B, T, BT, C, OC, d_Out, d_In, d_Weight, d_Bias, matmul_forward_kernel, block_size);
 
         float* p_p_d_Out = (float*)malloc(B * T * C * sizeof(float));
         checkCudaErrors(cuMemcpyDtoH_v2(p_p_d_Out, d_Out, (ulong)(B * T * C * sizeof(float))));
         bool ok = validate_results(p_p_d_Out, h_Out, B * T * C);
         free(p_p_d_Out);
-
-        if (useHostAlloc) {
-            checkCudaErrors(cuMemFreeHost(p_d_Out));
-            checkCudaErrors(cuMemFreeHost(p_d_In));
-            checkCudaErrors(cuMemFreeHost(p_d_Weight));
-            checkCudaErrors(cuMemFreeHost(p_d_Bias));
-        } else {
-            checkCudaErrors(cuMemFree_v2(d_In));
-            checkCudaErrors(cuMemFree_v2(d_Out));
-            checkCudaErrors(cuMemFree_v2(d_Weight));
-            checkCudaErrors(cuMemFree_v2(d_Bias));
-        }
-
-        free(h_Out);
-        free(h_In);
-        free(h_Weight);
-        free(h_Bias);
-
-        checkCudaErrors(cuCtxDestroy_v2(ctx));
 
         Console.WriteLine();
         if (ok) {
@@ -166,6 +137,42 @@ unsafe static class matmul_forward {
             Console.WriteLine($"FAILED.");
             Console.ResetColor();
         }
+
+        Console.WriteLine();
+        uint[] blocks = { 4, 8, 16, 32 };
+        for (int block = 0; block < blocks.Length; block++) {
+            block_size = blocks[block];
+            timespec start, end;
+            clock_gettime(CLOCK_MONOTONIC, &start);
+            for (int i = 0; i < 1024; i++) {
+                matmul_forward_1(B, T, BT, C, OC, d_Out, d_In, d_Weight, d_Bias, matmul_forward_kernel, block_size);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &end);
+            double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+            Console.Write("matmul_forward_1(block_size = {0}): {1} ms\n", block_size, time_elapsed_s * 1000);
+            p_p_d_Out = (float*)malloc(B * T * C * sizeof(float));
+            checkCudaErrors(cuMemcpyDtoH_v2(p_p_d_Out, d_Out, (ulong)(B * T * C * sizeof(float))));
+            if (!validate_results(p_p_d_Out, h_Out, B * T * C, "matmul_forward_1", bPrint: false)) {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"FAILED.");
+                Console.ResetColor();
+            }
+            free(p_p_d_Out);
+        }
+
+        checkCudaErrors(cuCtxSynchronize());
+
+        checkCudaErrors(cuMemFree_v2(d_In));
+        checkCudaErrors(cuMemFree_v2(d_Out));
+        checkCudaErrors(cuMemFree_v2(d_Weight));
+        checkCudaErrors(cuMemFree_v2(d_Bias));
+
+        free(h_Out);
+        free(h_In);
+        free(h_Weight);
+        free(h_Bias);
+
+        checkCudaErrors(cuCtxDestroy_v2(ctx));
 
         Console.WriteLine();
         printf("Press [Enter] to continue...");

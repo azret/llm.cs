@@ -39,35 +39,70 @@ unsafe static class train_gpt2_cuda {
     }
 
     public unsafe struct GPT2 {
+        public IntPtr encoder_forward_kernel;
         public IntPtr matmul_forward_kernel;
         public IntPtr layernorm_forward_kernel;
         public IntPtr residual_forward_kernel;
         public IntPtr gelu_kernel;
+        public IntPtr attention_query_key_kernel;
+        public IntPtr attention_softmax_kernel;
+        public IntPtr attention_value_kernel;
 
         // ----------------------------------------------------------------------------
         // all the individual layers' forward and backward passes
         // B = batch_size, T = sequence_length, C = channels, V = vocab_size
 
-        public static unsafe void encoder_forward(float* out_,
+        public static unsafe void encoder_forward(GPT2* model, float* out_,
                            int* inp, float* wte, float* wpe,
-                           int B, int T, int C) {
-            // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
-            // inp is (B,T) of integers, holding the token ids at each (b,t) position
-            // wte is (V,C) of token embeddings, short for "weight token embeddings"
-            // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    // seek to the output position in out[b,t,:]
-                    float* out_bt = out_ + b * T * C + t * C;
-                    // get the index of the token at inp[b, t]
-                    int ix = inp[b * T + t];
-                    // seek to the position in wte corresponding to the token
-                    float* wte_ix = wte + ix * C;
-                    // seek to the position in wpe corresponding to the position
-                    float* wpe_t = wpe + t * C;
-                    // add the two vectors and store the result in out[b,t,:]
-                    for (int i = 0; i < C; i++) {
-                        out_bt[i] = wte_ix[i] + wpe_t[i];
+                           int B, int T, int C, bool bSynchronize) {
+
+            if (model->encoder_forward_kernel != IntPtr.Zero) {
+
+                uint block_size = 16;
+
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_wte, (void*)wte, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_wpe, (void*)wpe, 0));
+
+                int N = B * T * C;
+
+                int d_B = B;
+                int d_T = T;
+                int d_C = C;
+
+                void*[] args = { &d_Out, &d_In, &d_wte, &d_wpe, &d_B, &d_T, &d_C };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->encoder_forward_kernel,
+                    CEIL_DIV((uint)N, block_size), 1, 1,
+                    block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
+
+            } else {
+                // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
+                // inp is (B,T) of integers, holding the token ids at each (b,t) position
+                // wte is (V,C) of token embeddings, short for "weight token embeddings"
+                // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
+                for (int b = 0; b < B; b++) {
+                    for (int t = 0; t < T; t++) {
+                        // seek to the output position in out[b,t,:]
+                        float* out_bt = out_ + b * T * C + t * C;
+                        // get the index of the token at inp[b, t]
+                        int ix = inp[b * T + t];
+                        // seek to the position in wte corresponding to the token
+                        float* wte_ix = wte + ix * C;
+                        // seek to the position in wpe corresponding to the position
+                        float* wpe_t = wpe + t * C;
+                        // add the two vectors and store the result in out[b,t,:]
+                        for (int i = 0; i < C; i++) {
+                            out_bt[i] = wte_ix[i] + wpe_t[i];
+                        }
                     }
                 }
             }
@@ -94,14 +129,10 @@ unsafe static class train_gpt2_cuda {
         public static unsafe void layernorm_forward(GPT2* model, float* out_, float* mean, float* rstd,
                                float* inp, float* weight, float* bias,
                                int B, int T, int C, bool bSynchronize) {
+
             if (model->layernorm_forward_kernel != IntPtr.Zero) {
 
-                // const int N = B * T;
-                // const int grid_size = ceil_div(N, block_size);
-                // layernorm_forward_kernel1 <<< grid_size, block_size >>> (out, mean, rstd, inp, weight, bias, N, C);
-                // cudaCheck(cudaGetLastError());
-
-                uint block_size = 256;
+                uint block_size = 16;
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
@@ -220,7 +251,7 @@ unsafe static class train_gpt2_cuda {
 
             if (model->matmul_forward_kernel != IntPtr.Zero) {
 
-                uint sqrt_block_size = 16;
+                uint block_size = 8;
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
@@ -240,8 +271,8 @@ unsafe static class train_gpt2_cuda {
 
                 checkCudaErrors(cuLaunchKernel(
                     model->matmul_forward_kernel,
-                    CEIL_DIV((uint)B * (uint)T, sqrt_block_size), CEIL_DIV((uint)OC, sqrt_block_size), 1,
-                    sqrt_block_size, sqrt_block_size, 1,
+                    CEIL_DIV((uint)B * (uint)T, block_size), CEIL_DIV((uint)OC, block_size), 1,
+                    block_size, block_size, 1,
                     0,
                     IntPtr.Zero,
                     args,
@@ -311,78 +342,133 @@ unsafe static class train_gpt2_cuda {
             });
         }
 
-        public static unsafe void attention_forward(float* out_, float* preatt, float* att,
+        public static unsafe void attention_forward(GPT2* model, float* out_, float* preatt, float* att,
                                float* inp,
-                               int B, int T, int C, int NH) {
-            // input is (B, T, 3C) holding the query, key, value (Q, K, V) vectors
-            // preatt, att are (B, NH, T, T). NH = number of heads, T = sequence length
-            // that holds the pre-attention and post-attention scores (used in backward)
-            // output is (B, T, C)
-            // attention is the only layer that mixes information across time
-            // every other operation is applied at every (b,t) position independently
-            // (and of course, no layer mixes information across batch)
-            int C3 = C*3;
-            int hs = C / NH; // head size
-            float scale = 1.0f / sqrtf(hs);
-            Parallel.For(0, B * T, (bt) => {
-                int b = bt / T;
-                int t = bt % T;
-                for (int h = 0; h < NH; h++) {
-                    float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-                    float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
-                    float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+                               int B, int T, int C, int NH,
+                               bool bSynchronize) {
+            if (model->attention_query_key_kernel != IntPtr.Zero
+                    && model->attention_softmax_kernel != IntPtr.Zero
+                       && model->attention_value_kernel != IntPtr.Zero) {
 
-                    // pass 1: calculate query dot key and maxval
-                    float maxval = -10000.0f; // TODO something better
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_preatt, (void*)preatt, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_att, (void*)att, 0));
+                checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_inp, (void*)inp, 0));
 
-                        // (query_t) dot (key_t2)
-                        float val = 0.0f;
-                        for (int i = 0; i < hs; i++) {
-                            val += query_t[i] * key_t2[i];
+                uint block_size = 16;
+
+                int d_B = B;
+                int d_T = T;
+                int d_C = C;
+                int d_NH = NH;
+
+                void*[] args = new void*[] { &d_preatt, &d_inp, &d_B, &d_T, &d_C, &d_NH };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->attention_query_key_kernel,
+                    CEIL_DIV((uint)(B * NH * T * T), block_size), 1, 1,
+                    block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                args = new void*[] { &d_att, &d_preatt, &d_B, &d_T, &d_NH };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->attention_softmax_kernel,
+                    CEIL_DIV((uint)(B * T * NH), block_size), 1, 1,
+                    block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                args = new void*[] { &d_Out, &d_att, &d_inp, &d_B, &d_T, &d_C, &d_NH };
+
+                checkCudaErrors(cuLaunchKernel(
+                    model->attention_value_kernel,
+                    CEIL_DIV((uint)(B * T * NH), block_size), 1, 1,
+                    block_size, 1, 1,
+                    0,
+                    IntPtr.Zero,
+                    args,
+                    null));
+
+                if (bSynchronize) checkCudaErrors(cuCtxSynchronize());
+
+            } else {
+
+                // input is (B, T, 3C) holding the query, key, value (Q, K, V) vectors
+                // preatt, att are (B, NH, T, T). NH = number of heads, T = sequence length
+                // that holds the pre-attention and post-attention scores (used in backward)
+                // output is (B, T, C)
+                // attention is the only layer that mixes information across time
+                // every other operation is applied at every (b,t) position independently
+                // (and of course, no layer mixes information across batch)
+                int C3 = C * 3;
+                int hs = C / NH; // head size
+                float scale = 1.0f / sqrtf(hs);
+                Parallel.For(0, B * T, (bt) => {
+                    int b = bt / T;
+                    int t = bt % T;
+                    for (int h = 0; h < NH; h++) {
+                        float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+                        float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
+                        float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+
+                        // pass 1: calculate query dot key and maxval
+                        float maxval = -10000.0f; // TODO something better
+                        for (int t2 = 0; t2 <= t; t2++) {
+                            float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+
+                            // (query_t) dot (key_t2)
+                            float val = 0.0f;
+                            for (int i = 0; i < hs; i++) {
+                                val += query_t[i] * key_t2[i];
+                            }
+                            val *= scale;
+                            if (val > maxval) {
+                                maxval = val;
+                            }
+
+                            preatt_bth[t2] = val;
                         }
-                        val *= scale;
-                        if (val > maxval) {
-                            maxval = val;
+
+                        // pass 2: calculate the exp and keep track of sum
+                        // maxval is being calculated and subtracted only for numerical stability
+                        float expsum = 0.0f;
+                        for (int t2 = 0; t2 <= t; t2++) {
+                            float expv = expf(preatt_bth[t2] - maxval);
+                            expsum += expv;
+                            att_bth[t2] = expv;
+                        }
+                        float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
+
+                        // pass 3: normalize to get the softmax
+                        for (int t2 = 0; t2 < T; t2++) {
+                            if (t2 <= t) {
+                                att_bth[t2] *= expsum_inv;
+                            } else {
+                                // causal attention mask. not strictly necessary to set to zero here
+                                // only doing this explicitly for debugging and checking to PyTorch
+                                att_bth[t2] = 0.0f;
+                            }
                         }
 
-                        preatt_bth[t2] = val;
-                    }
-
-                    // pass 2: calculate the exp and keep track of sum
-                    // maxval is being calculated and subtracted only for numerical stability
-                    float expsum = 0.0f;
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float expv = expf(preatt_bth[t2] - maxval);
-                        expsum += expv;
-                        att_bth[t2] = expv;
-                    }
-                    float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
-
-                    // pass 3: normalize to get the softmax
-                    for (int t2 = 0; t2 < T; t2++) {
-                        if (t2 <= t) {
-                            att_bth[t2] *= expsum_inv;
-                        } else {
-                            // causal attention mask. not strictly necessary to set to zero here
-                            // only doing this explicitly for debugging and checking to PyTorch
-                            att_bth[t2] = 0.0f;
+                        // pass 4: accumulate weighted values into the output of attention
+                        float* out_bth = out_ + b * T * C + t * C + h * hs;
+                        for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
+                        for (int t2 = 0; t2 <= t; t2++) {
+                            float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
+                            float att_btht2 = att_bth[t2];
+                            for (int i = 0; i < hs; i++) {
+                                out_bth[i] += att_btht2 * value_t2[i];
+                            }
                         }
                     }
-
-                    // pass 4: accumulate weighted values into the output of attention
-                    float* out_bth = out_ + b * T * C + t * C + h * hs;
-                    for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
-                    for (int t2 = 0; t2 <= t; t2++) {
-                        float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
-                        float att_btht2 = att_bth[t2];
-                        for (int i = 0; i < hs; i++) {
-                            out_bth[i] += att_btht2 * value_t2[i];
-                        }
-                    }
-                }
-            });
+                });
+            }
         }
 
         public static unsafe void attention_backward(float* dinp, float* dpreatt, float* datt,
@@ -449,7 +535,7 @@ unsafe static class train_gpt2_cuda {
         public static unsafe void gelu_forward(GPT2* model, float* out_, float* inp, int N, bool bSynchronize) {
             if (model->gelu_kernel != IntPtr.Zero) {
 
-                const uint block_size = 128;
+                const uint block_size = 16;
 
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_Out, (void*)out_, 0));
                 checkCudaErrors(cuMemHostGetDevicePointer_v2(out var d_In, (void*)inp, 0));
@@ -499,7 +585,7 @@ unsafe static class train_gpt2_cuda {
         public static unsafe void residual_forward(GPT2* model, float* out_, float* inp1, float* inp2, int N, bool bSynchronize) {
             if (model->residual_forward_kernel != IntPtr.Zero) {
 
-                uint block_size = 256;
+                uint block_size = 16;
 
                 checkCudaErrors(cuCtxSynchronize());
 
@@ -817,12 +903,14 @@ unsafe static class train_gpt2_cuda {
             printf("> Compiling CUDA source file %s...\n", "train_gpt2_cuda.cu");
             byte[] ptx = CompileFromEmbeddedResource("LLM.dev.train_gpt2_cuda.cu");
             checkCudaErrors(cuModuleLoadData(out var cuModule, ptx));
-
             checkCudaErrors(cuModuleGetFunction(out model->matmul_forward_kernel, cuModule, "matmul_forward_kernel"));
             checkCudaErrors(cuModuleGetFunction(out model->layernorm_forward_kernel, cuModule, "layernorm_forward_kernel"));
             checkCudaErrors(cuModuleGetFunction(out model->residual_forward_kernel, cuModule, "residual_forward_kernel"));
             checkCudaErrors(cuModuleGetFunction(out model->gelu_kernel, cuModule, "gelu_kernel"));
-
+            checkCudaErrors(cuModuleGetFunction(out model->encoder_forward_kernel, cuModule, "encoder_forward_kernel"));
+            checkCudaErrors(cuModuleGetFunction(out model->attention_query_key_kernel, cuModule, "attention_query_key_kernel"));
+            checkCudaErrors(cuModuleGetFunction(out model->attention_softmax_kernel, cuModule, "attention_softmax_kernel"));
+            checkCudaErrors(cuModuleGetFunction(out model->attention_value_kernel, cuModule, "attention_value_kernel"));
         }
 
         public static unsafe void gpt2_forward(GPT2* model, int* inputs, int* targets, int B, int T) {
@@ -904,7 +992,7 @@ unsafe static class train_gpt2_cuda {
             ParameterTensors params_ = model->params_; // for brevity
             ActivationTensors acts = model->acts;
             float* residual;
-            encoder_forward(acts.encoded, inputs, params_.wte, params_.wpe, B, T, C); // encoding goes into residual[0]
+            encoder_forward(model, acts.encoded, model->inputs, params_.wte, params_.wpe, B, T, C, false); // encoding goes into residual[0]
             for (int l = 0; l < L; l++) {
 
                 residual = l == 0 ? acts.encoded : acts.residual3 + (l - 1) * B * T * C;
@@ -943,8 +1031,8 @@ unsafe static class train_gpt2_cuda {
 
                 // now do the forward pass
                 layernorm_forward(model, l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C, false);
-                matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C, true);
-                attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
+                matmul_forward(model, l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C, false);
+                attention_forward(model, l_atty, l_preatt, l_att, l_qkv, B, T, C, NH, false);
                 matmul_forward(model, l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C, false);
                 residual_forward(model, l_residual2, residual, l_attproj, B*T*C, false);
                 layernorm_forward(model, l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C, false);
@@ -960,7 +1048,7 @@ unsafe static class train_gpt2_cuda {
 
             // also forward the cross-entropy loss function if we have the targets
             if (targets != null) {
-                crossentropy_forward(model->acts.losses, model->acts.probs, targets, B, T, V);
+                crossentropy_forward(model->acts.losses, model->acts.probs, model->targets, B, T, V);
                 // for convenience also evaluate the mean loss
                 float mean_loss = 0.0f;
                 for (int i=0; i<B*T; i++) { mean_loss += model->acts.losses[i]; }
@@ -1313,7 +1401,7 @@ unsafe static class train_gpt2_cuda {
         string tiny_shakespeare_val = "data/tiny_shakespeare_val.bin";
         string train_tokens = File.Exists(tiny_shakespeare_train) ? tiny_shakespeare_train : tiny_stories_train;
         string val_tokens = File.Exists(tiny_shakespeare_val) ? tiny_shakespeare_val : tiny_stories_val;
-        int B = 8; // batch size 4 (i.e. 4 independent token sequences will be trained on)
+        int B = 4; // batch size 4 (i.e. 4 independent token sequences will be trained on)
         int T = 64; // sequence length 64 (i.e. each sequence is 64 tokens long). must be <= maxT, which is 1024 for GPT-2
         DataLoader train_loader;
         DataLoader.dataloader_init(&train_loader, train_tokens, B, T);

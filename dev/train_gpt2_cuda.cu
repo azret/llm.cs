@@ -1,9 +1,138 @@
+#ifndef _HUGE_ENUF
+#define _HUGE_ENUF  1e+300  // _HUGE_ENUF*_HUGE_ENUF must overflow
+#endif
+
+#ifndef INFINITY
+#define INFINITY   ((float)(_HUGE_ENUF * _HUGE_ENUF))
+#endif
+
+extern "C" __global__ void attention_query_key_kernel(float* preatt, const float* inp,
+    int B, int T, int C, int NH) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = B * NH * T * T;
+
+    if (idx < total_threads) {
+        int t2 = idx % T;
+        int t = (idx / T) % T;
+        if (t2 > t) {
+            // autoregressive mask
+            preatt[idx] = -INFINITY;
+            return;
+        }
+        int h = (idx / (T * T)) % NH;
+        int b = idx / (NH * T * T);
+
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+        const float* query_t = inp + b * T * C3 + t * C3 + h * hs;
+        const float* key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C; // +C because it's key
+
+        // (query_t) dot (key_t2)
+        float val = 0.0f;
+        for (int i = 0; i < hs; i++) {
+            val += query_t[i] * key_t2[i];
+        }
+        val *= 1.0 / sqrtf(hs);
+
+        preatt[idx] = val;
+    }
+}
+
+extern "C" __global__ void attention_softmax_kernel(float* att, const float* preatt,
+    int B, int T, int NH) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = B * T * NH;
+
+    if (idx < total_threads) {
+        int h = idx % NH;
+        int t = (idx / NH) % T;
+        int b = idx / (NH * T);
+
+        const float* preatt_bth = preatt + b * NH * T * T + h * T * T + t * T;
+        float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+
+        // find maxval
+        float maxval = -10000.0f; // TODO something better
+        for (int t2 = 0; t2 <= t; t2++) {
+            if (preatt_bth[t2] > maxval) {
+                maxval = preatt_bth[t2];
+            }
+        }
+
+        // calculate the exp and keep track of sum
+        float expsum = 0.0f;
+        for (int t2 = 0; t2 <= t; t2++) {
+            float expv = expf(preatt_bth[t2] - maxval);
+            expsum += expv;
+            att_bth[t2] = expv;
+        }
+        float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
+
+        // normalize to get the softmax
+        for (int t2 = 0; t2 < T; t2++) {
+            if (t2 <= t) {
+                att_bth[t2] *= expsum_inv;
+            }
+            else {
+                // causal attention mask. not strictly necessary to set to zero here
+                // only doing this explicitly for debugging and checking to PyTorch
+                att_bth[t2] = 0.0f;
+            }
+        }
+    }
+}
+
+extern "C" __global__ void attention_value_kernel(float* out, const float* att, const float* inp,
+    int B, int T, int C, int NH) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = B * T * NH;
+
+    if (idx < total_threads) {
+        int h = idx % NH;
+        int t = (idx / NH) % T;
+        int b = idx / (NH * T);
+
+        int C3 = C * 3;
+        int hs = C / NH; // head size
+
+        float* out_bth = out + b * T * C + t * C + h * hs;
+        const float* att_bth = att + b * NH * T * T + h * T * T + t * T;
+
+        for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
+        for (int t2 = 0; t2 <= t; t2++) {
+            const  float* value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C * 2; // +C*2 because it's value
+            float att_btht2 = att_bth[t2];
+            for (int i = 0; i < hs; i++) {
+                out_bth[i] += att_btht2 * value_t2[i];
+            }
+        }
+    }
+}
+
+extern "C" __global__ void encoder_forward_kernel(float* out,
+    const int* inp, const float* wte, const float* wpe,
+    int B, int T, int C) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int N = B * T * C;
+
+    if (idx < N) {
+        int bt = idx / C;
+        int b = bt / T;
+        int t = bt % T;
+        int c = idx % C;
+
+        int ix = inp[b * T + t];
+
+        float* out_btc = out + b * T * C + t * C + c;
+        const float* wte_ix = wte + ix * C + c;
+        const float* wpe_tc = wpe + t * C + c;
+        *out_btc = *wte_ix + *wpe_tc;
+    }
+}
+
 extern "C" __global__  void matmul_forward_kernel(float* out,
     const float* inp, const float* weight, const float* bias,
     int BT, int C, int OC) {
-    // out is (B,T,OC). OC is short for "output channels", e.g. OC = 4 * C
-    // inp is (B,T,C), weight is (OC, C), bias is (OC)
-    // in the naive kernel, every thread handles one element of out
     int bt = blockIdx.x * blockDim.x + threadIdx.x;
     int oc = blockIdx.y * blockDim.y + threadIdx.y;
     if (bt < BT && oc < OC) {
